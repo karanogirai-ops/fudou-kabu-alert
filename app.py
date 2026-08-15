@@ -19,10 +19,16 @@ def load_stocks():
         with open("stocks.csv", "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
+                # 浮動株数が空欄や文字だった場合は「0」として安全に読み込む
+                try:
+                    fs = float(row["FloatShares"])
+                except ValueError:
+                    fs = 0.0
+                    
                 stocks.append({
                     "ticker": row["Ticker"],
                     "name": row["Name"],
-                    "float_shares": float(row["FloatShares"])
+                    "float_shares": fs
                 })
     except Exception as e:
         st.error(f"CSVファイルの読み込みエラー: {e}")
@@ -45,35 +51,37 @@ if st.button("今すぐスキャンを実行"):
             
             try:
                 stock = yf.Ticker(ticker)
-                # 休場などを考慮し、余裕を持たせて「直近5日分」のデータを取得する
                 history = stock.history(period="5d")
                 
+                # 🚨 エラー切り分け①：出来高（チャート）データがない場合
                 if history.empty:
+                    st.warning(f"📉 {name} ({ticker}): 出来高データが取得できません（yfinance未対応）。")
                     continue
                     
-                # 取得した最新データの日付を確認
                 latest_date = history.index[-1].date()
                 
-                # ★ 16時を境界に、参照するデータを切り替える判定ロジック
+                # 16時を境界に、参照するデータを切り替える判定ロジック
                 if now.hour < 16 and latest_date == now.date() and len(history) >= 2:
-                    # 16時前 かつ 最新データが「今日」のものなら、1つ前の行（前営業日）を使う
                     target_index = -2
                 else:
-                    # 16時以降、または土日など（最新データが今日ではない）場合は、一番下の最新行を使う
                     target_index = -1
                     
-                # ターゲットの日付のデータを抜き出す
                 target_data = history.iloc[target_index]
                 current_price = target_data['Close']
                 daily_volume = target_data['Volume']
-                target_date_str = target_data.name.strftime('%Y/%m/%d') # 参照した日付
+                target_date_str = target_data.name.strftime('%Y/%m/%d')
                 
-                # ★ハイブリッド取得：yfinanceのデータを優先し、なければCSVの数値を使う
+                # ハイブリッド取得：yfinanceのデータを優先し、なければCSVの数値を使う
                 auto_float = stock.info.get('floatShares')
                 if auto_float is not None and auto_float > 0:
                     float_shares = auto_float
                 else:
                     float_shares = info["float_shares"]
+                
+                # 🚨 エラー切り分け②：浮動株数が不明（0）な場合
+                if float_shares <= 0:
+                    st.warning(f"❓ {name} ({ticker}): 浮動株数が不明なため計算できません（CSVを確認してください）。")
+                    continue
                 
                 # 回転率の計算
                 turnover_rate = (daily_volume / float_shares) * 100
@@ -82,7 +90,6 @@ if st.button("今すぐスキャンを実行"):
                 if turnover_rate >= THRESHOLD_PERCENT:
                     alert_count += 1
                     
-                    # 上昇率の計算（参照している日のさらに1日前の終値と比較）
                     if len(history) >= abs(target_index) + 1:
                         prev_close = history.iloc[target_index - 1]['Close']
                         price_change = ((current_price - prev_close) / prev_close) * 100
@@ -109,11 +116,12 @@ if st.button("今すぐスキャンを実行"):
                 })
                 
             except Exception as e:
-                st.warning(f"{name} のデータ取得に失敗しました。")
+                # 🚨 エラー切り分け③：その他の予期せぬエラー
+                st.error(f"⚠️ {name} ({ticker}): 予期せぬエラーが発生しました（詳細: {e}）")
         
         # 画面に結果を表示
         if results:
             st.success(f"スキャン完了！ {alert_count}件のアラートを送信しました。")
             st.table(pd.DataFrame(results))
         else:
-            st.info("データが取得できませんでした。")
+            st.info("正常に計算できたデータがありませんでした。")
