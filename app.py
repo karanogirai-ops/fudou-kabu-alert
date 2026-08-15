@@ -37,6 +37,7 @@ if st.button("今すぐスキャンを実行"):
         stocks = load_stocks()
         results = []
         alert_count = 0
+        now = datetime.datetime.now()
         
         for info in stocks:
             ticker = info["ticker"]
@@ -44,13 +45,28 @@ if st.button("今すぐスキャンを実行"):
             
             try:
                 stock = yf.Ticker(ticker)
-                history = stock.history(period="1d")
+                # 休場などを考慮し、余裕を持たせて「直近5日分」のデータを取得する
+                history = stock.history(period="5d")
                 
                 if history.empty:
                     continue
                     
-                current_price = history['Close'].iloc[0]
-                daily_volume = history['Volume'].iloc[0]
+                # 取得した最新データの日付を確認
+                latest_date = history.index[-1].date()
+                
+                # ★ 16時を境界に、参照するデータを切り替える判定ロジック
+                if now.hour < 16 and latest_date == now.date() and len(history) >= 2:
+                    # 16時前 かつ 最新データが「今日」のものなら、1つ前の行（前営業日）を使う
+                    target_index = -2
+                else:
+                    # 16時以降、または土日など（最新データが今日ではない）場合は、一番下の最新行を使う
+                    target_index = -1
+                    
+                # ターゲットの日付のデータを抜き出す
+                target_data = history.iloc[target_index]
+                current_price = target_data['Close']
+                daily_volume = target_data['Volume']
+                target_date_str = target_data.name.strftime('%Y/%m/%d') # 参照した日付
                 
                 # ★ハイブリッド取得：yfinanceのデータを優先し、なければCSVの数値を使う
                 auto_float = stock.info.get('floatShares')
@@ -65,21 +81,26 @@ if st.button("今すぐスキャンを実行"):
                 # 閾値判定とDiscord通知
                 if turnover_rate >= THRESHOLD_PERCENT:
                     alert_count += 1
-                    prev_close = stock.info.get('previousClose', current_price)
-                    price_change = ((current_price - prev_close) / prev_close) * 100
-                    date_str = datetime.datetime.now().strftime("%Y/%m/%d %H:%M")
                     
+                    # 上昇率の計算（参照している日のさらに1日前の終値と比較）
+                    if len(history) >= abs(target_index) + 1:
+                        prev_close = history.iloc[target_index - 1]['Close']
+                        price_change = ((current_price - prev_close) / prev_close) * 100
+                    else:
+                        price_change = 0.0
+                        
                     msg = (
                         f"🚨 **浮動株回転率アラート({THRESHOLD_PERCENT}%超え)** 🚨\n"
                         f"・銘柄: **{name} ({ticker})**\n"
+                        f"・対象日: **{target_date_str}** の確定データ\n"
                         f"・回転率: **{turnover_rate:.2f} %**\n"
                         f"・上昇率: **{price_change:.2f} %**\n"
-                        f"・確認日時: {date_str}"
+                        f"・確認日時: {now.strftime('%Y/%m/%d %H:%M')}"
                     )
                     send_discord(msg)
-                    status = "🚨 通知済"
+                    status = f"🚨 通知済 ({target_date_str})"
                 else:
-                    status = "🟢 正常"
+                    status = f"🟢 正常 ({target_date_str})"
                 
                 results.append({
                     "銘柄名": name,
