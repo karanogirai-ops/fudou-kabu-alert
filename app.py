@@ -27,7 +27,6 @@ def load_default_stocks():
     return stocks
 
 def load_groups():
-    """サーバー上のJSONファイルから最新グループデータを読み込む"""
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -40,57 +39,12 @@ def load_groups():
     return initial_groups
 
 def save_groups(groups):
-    """グループデータをJSONファイルに上書き保存して全端末で共有する"""
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(groups, f, ensure_ascii=False, indent=2)
 
 # --- 3. 画面UIと処理 ---
 st.title("🚀 株式回転率チェッカー")
 
-# ★ スマホ用CSS：ボタンのサイズ・余白を極小化し、絶対に枠内に収める設定
-st.markdown("""
-<style>
-/* 1. 横並びカラムの折り返し防止と余白最適化 */
-div[data-testid="stHorizontalBlock"] {
-    display: flex !important;
-    flex-direction: row !important;
-    flex-wrap: nowrap !important;
-    align-items: center !important;
-    justify-content: space-between !important;
-    margin-bottom: 4px !important;
-}
-
-div[data-testid="column"] {
-    min-width: 0 !important;
-}
-
-/* 2. 右側の削除ボタン（✕）をコンパクトな極小アイコン化 */
-div[data-testid="column"]:nth-child(2) button {
-    width: 26px !important;
-    min-width: 26px !important;
-    height: 26px !important;
-    min-height: 26px !important;
-    padding: 0px !important;
-    font-size: 12px !important;
-    line-height: 1 !important;
-    border-radius: 4px !important;
-    margin: 0 !important;
-    border: 1px solid #ccc !important;
-    background-color: #ffffff !important;
-    color: #333333 !important;
-}
-
-/* 3. 銘柄名テキストのフォントサイズ調整 */
-.stock-item-text {
-    font-size: 14px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# 最新のグループデータをサーバーファイルからロード
 groups = load_groups()
 
 # ★ グループ＆銘柄の管理セクション
@@ -127,20 +81,26 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
     st.markdown(f"**現在の「{active_group}」の登録一覧 (計 {len(groups[active_group])} 銘柄)**")
     
-    # ★ 85:15の黄金比率で配置
+    # ★ スマホ画面に100%納まる銘柄一覧表示
     if groups[active_group]:
-        for idx, item in enumerate(groups[active_group]):
-            c1, c2 = st.columns([85, 15], vertical_alignment="center")
-            with c1:
-                st.markdown(f"<div class='stock-item-text'><code>{item['ticker']}</code> {item['name']}</div>", unsafe_allow_html=True)
-            with c2:
-                if st.button("✕", key=f"del_{active_group}_{idx}_{item['ticker']}"):
-                    deleted_name = groups[active_group].pop(idx)['name']
-                    save_groups(groups)
-                    st.success(f"「{deleted_name}」を削除しました！")
-                    st.rerun()
+        df_display = pd.DataFrame(groups[active_group])
+        df_display.columns = ["コード", "銘柄名"]
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+        # ★ 誤入力銘柄の削除機能（選択ドロップダウン方式）
+        delete_options = [f"{item['ticker']} | {item['name']}" for item in groups[active_group]]
+        selected_to_delete = st.selectbox("🗑️ 削除したい銘柄を選択", delete_options, key=f"del_select_{active_group}")
+        
+        if st.button("選択した銘柄を削除", use_container_width=True):
+            target_ticker = selected_to_delete.split(" | ")[0]
+            groups[active_group] = [item for item in groups[active_group] if item["ticker"] != target_ticker]
+            save_groups(groups)
+            st.success("削除して保存しました！")
+            st.rerun()
     else:
         st.info("このグループには銘柄が登録されていません。")
+
+    st.divider()
 
     # 4. 銘柄の一括追加（テキストエリアでコピペ対応）
     st.markdown("**📥 テキストエリアからコピペで一括追加**")
