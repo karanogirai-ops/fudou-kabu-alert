@@ -80,7 +80,7 @@ def save_groups(groups):
         st.error(f"データ保存エラー: {e}")
 
 # --- 3. 画面UIと処理 ---
-st.title("🚀 株式回転率チェッカー（Supabase永続化対応）")
+st.title("🚀 株式回転率チェッカー")
 
 groups = load_groups()
 
