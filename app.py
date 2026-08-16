@@ -4,11 +4,14 @@ import pandas as pd
 import csv
 import datetime
 import time
+import json
+import os
 
 # --- 1. 設定 ---
 SLEEP_TIME = 0.5         # YahooからBANされないための待機時間（秒）
+DATA_FILE = "groups.json" # 全端末共有のデータ保存ファイル
 
-# --- 2. 処理関数 ---
+# --- 2. 永続化（データ読み書き）関数 ---
 def load_default_stocks():
     stocks = []
     try:
@@ -23,39 +26,57 @@ def load_default_stocks():
         pass
     return stocks
 
-# --- 3. セッション状態の初期化 ---
-if "groups" not in st.session_state:
-    st.session_state.groups = {
-        "基本グループ": load_default_stocks()
-    }
+def load_groups():
+    """サーバー上のJSONファイルから最新グループデータを読み込む"""
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    
+    # 初回起動時（ファイルが存在しない場合）は初期グループを作成して保存
+    initial_groups = {"基本グループ": load_default_stocks()}
+    save_groups(initial_groups)
+    return initial_groups
 
-# --- 4. 画面UI ---
-st.title("🚀 株式回転率チェッカー（分割スキャン対応）")
-st.write("銘柄をグループ（100社単位など）に分けて管理し、安全にスキャンを実行します。")
+def save_groups(groups):
+    """グループデータをJSONファイルに上書き保存して全端末で共有する"""
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(groups, f, ensure_ascii=False, indent=2)
+
+# --- 3. 画面UIと処理 ---
+st.title("🚀 株式回転率チェッカー（全端末同期版）")
+st.write("銘柄をグループ単位で管理し、PC・スマホ間で同期して安全にスキャンします。")
+
+# 最新のグループデータをサーバーファイルからロード
+groups = load_groups()
 
 # ★ グループ＆銘柄の管理セクション
 with st.expander("⚙️ グループの作成・名前変更・銘柄追加", expanded=False):
     
-    # 新規グループの作成
+    # 1. 新規グループの作成
     col_g1, col_g2 = st.columns([3, 1])
     with col_g1:
         new_group_name = st.text_input("新しいグループを作成（例: プライム100社）", key="new_group_input")
     with col_g2:
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
         if st.button("グループを作成"):
-            if new_group_name and new_group_name not in st.session_state.groups:
-                st.session_state.groups[new_group_name] = []
-                st.success(f"グループ「{new_group_name}」を作成しました！")
+            if new_group_name and new_group_name not in groups:
+                groups[new_group_name] = []
+                save_groups(groups)
+                st.success(f"グループ「{new_group_name}」を作成・保存しました！")
                 st.rerun()
-            elif new_group_name in st.session_state.groups:
+            elif new_group_name in groups:
                 st.warning("そのグループ名は既に存在します。")
 
     st.divider()
 
-    # 管理対象グループの選択
-    active_group = st.selectbox("編集対象のグループを選択", list(st.session_state.groups.keys()))
+    # 2. 管理対象グループの選択
+    group_names = list(groups.keys())
+    active_group = st.selectbox("編集対象のグループを選択", group_names)
     
-    # ★ 追加：グループ名の変更機能
+    # 3. グループ名の変更機能
     col_r1, col_r2 = st.columns([3, 1])
     with col_r1:
         rename_group_input = st.text_input("選択中グループの名前を変更", value=active_group, key=f"rename_{active_group}")
@@ -63,18 +84,19 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄追加", e
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
         if st.button("名前を変更"):
             if rename_group_input and rename_group_input != active_group:
-                if rename_group_input in st.session_state.groups:
+                if rename_group_input in groups:
                     st.warning("そのグループ名は既に存在します。")
                 else:
-                    st.session_state.groups[rename_group_input] = st.session_state.groups.pop(active_group)
-                    st.success(f"「{active_group}」を「{rename_group_input}」に変更しました！")
+                    groups[rename_group_input] = groups.pop(active_group)
+                    save_groups(groups)
+                    st.success(f"「{active_group}」を「{rename_group_input}」に変更・保存しました！")
                     st.rerun()
 
-    st.markdown(f"**現在の「{active_group}」の登録数:** {len(st.session_state.groups[active_group])} 銘柄")
-    if st.session_state.groups[active_group]:
-        st.dataframe(pd.DataFrame(st.session_state.groups[active_group]), use_container_width=True)
+    st.markdown(f"**現在の「{active_group}」の登録数:** {len(groups[active_group])} 銘柄")
+    if groups[active_group]:
+        st.dataframe(pd.DataFrame(groups[active_group]), use_container_width=True)
 
-    # 銘柄の一括追加（テキストエリアでコピペ対応）
+    # 4. 銘柄の一括追加（テキストエリアでコピペ対応）
     st.markdown("**📥 テキストエリアからコピペで一括追加**")
     st.caption("改行区切りで「コード, 銘柄名」または「コードのみ」を一括入力できます。")
     bulk_input = st.text_area(
@@ -96,26 +118,28 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄追加", e
                 
                 formatted_ticker = raw_ticker.upper() if raw_ticker.endswith(".T") else f"{raw_ticker}.T"
                 
-                st.session_state.groups[active_group].append({
+                groups[active_group].append({
                     "ticker": formatted_ticker,
                     "name": name
                 })
                 added_count += 1
             
-            st.success(f"「{active_group}」に {added_count} 件の銘柄を追加しました！")
+            save_groups(groups)
+            st.success(f"「{active_group}」に {added_count} 件の銘柄を追加・保存しました！")
             st.rerun()
 
-    # グループの削除
+    # 5. グループの削除
     if active_group != "基本グループ":
         if st.button(f"🗑️ 「{active_group}」グループごと削除"):
-            del st.session_state.groups[active_group]
+            del groups[active_group]
+            save_groups(groups)
             st.success(f"グループ「{active_group}」を削除しました。")
             st.rerun()
 
 st.divider()
 
 # ★ スキャン設定と実行
-selected_scan_group = st.selectbox("🎯 スキャンを実行するグループを選択", list(st.session_state.groups.keys()))
+selected_scan_group = st.selectbox("🎯 スキャンを実行するグループを選択", list(groups.keys()))
 
 threshold_percent = st.number_input(
     "アラートを出す回転率の閾値（%）",
@@ -127,7 +151,7 @@ threshold_percent = st.number_input(
 )
 
 if st.button("今すぐスキャンを実行"):
-    stocks = st.session_state.groups[selected_scan_group]
+    stocks = groups[selected_scan_group]
     total_stocks = len(stocks)
     
     if total_stocks == 0:
