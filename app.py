@@ -7,6 +7,9 @@ import time
 import requests
 
 # --- 1. 設定 & Supabase REST API設定 ---
+# 一度に通信する銘柄数（BAN対策として200銘柄ずつ小分け取得）
+CHUNK_SIZE = 200
+
 def get_supabase_config():
     url = st.secrets["SUPABASE_URL"].rstrip("/")
     key = st.secrets["SUPABASE_KEY"].strip()
@@ -24,17 +27,7 @@ def get_supabase_config():
     }
     return rest_url, headers
 
-# --- 2. キャッシュ機能付き一括データ取得 ---
-@st.cache_data(ttl=86400)
-def get_shares_outstanding_cached(ticker):
-    """発行済株式数は変化が少ないため、24時間(86400秒)キャッシュして通信削減"""
-    try:
-        stock = yf.Ticker(ticker)
-        return stock.info.get('sharesOutstanding')
-    except Exception:
-        return None
-
-# --- 3. 永続化（Supabase REST API読み書き）関数 ---
+# --- 2. 永続化（Supabase REST API読み書き）関数 ---
 def load_default_stocks():
     stocks = []
     try:
@@ -81,15 +74,38 @@ def save_groups(groups):
     except Exception as e:
         st.error(f"データ保存エラー: {e}")
 
+# --- 3. 発行済株式数の一括取得＆キャッシュ（通信激減処理） ---
+@st.cache_data(ttl=86400)
+def fetch_shares_outstanding_batch(ticker_list):
+    """
+    主要銘柄・全銘柄の発行済株式数を可能な限り効率的に取得
+    24時間キャッシュするため、1日1回以上の通信は発生しません
+    """
+    shares_map = {}
+    # 安全のため小分け取得
+    for i in range(0, len(ticker_list), 50):
+        chunk = ticker_list[i:i + 50]
+        for t in chunk:
+            try:
+                stock = yf.Ticker(t)
+                # fast_infoを使うことで低負荷かつ高速に取得
+                s_out = stock.fast_info.get('shares_outstanding') or stock.info.get('sharesOutstanding')
+                if s_out and s_out > 0:
+                    shares_map[t] = s_out
+            except Exception:
+                pass
+        time.sleep(0.2)
+    return shares_map
+
 # --- 4. 画面UIと処理 ---
-st.title("🚀 株式回転率チェッカー（超高速一括取得版）")
+st.title("🚀 株式回転率チェッカー（東証全銘柄・極小通信対応）")
 
 groups = load_groups()
 
 # ★ グループ＆銘柄の管理セクション
 with st.expander("⚙️ グループの作成・名前変更・銘柄管理", expanded=False):
     
-    new_group_name = st.text_input("新しいグループを作成（例: プライム225）", key="new_group_input")
+    new_group_name = st.text_input("新しいグループを作成（例: 東証全銘柄）", key="new_group_input")
     if st.button("グループを作成", use_container_width=True):
         if new_group_name and new_group_name not in groups:
             groups[new_group_name] = []
@@ -136,9 +152,9 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
     st.divider()
 
-    st.markdown("**📥 テキストエリアからコピペで一括追加**")
+    st.markdown("**📥 CSV/コピペから一括追加**")
     bulk_input = st.text_area(
-        "入力例:\n7203.T, トヨタ自動車\n9984.T, ソフトバンクG\n\n(コードだけでもOK):\n8306.T\n8316.T", 
+        "JPXのExcel/CSV等から「コード, 銘柄名」をコピペしてください:", 
         height=140
     )
     
@@ -175,7 +191,7 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
 st.divider()
 
-# ★ 超高速一括スキャン設定と実行
+# ★ 超安全・超高速スキャン実行
 selected_scan_group = st.selectbox("🎯 スキャンを実行するグループを選択", list(groups.keys()))
 
 threshold_percent = st.number_input(
@@ -186,7 +202,7 @@ threshold_percent = st.number_input(
     step=1.0
 )
 
-if st.button("🚀 今すぐ高速スキャンを実行（一括通信）", use_container_width=True):
+if st.button("🛡️ BAN対策スキャンを実行（安全一括取得）", use_container_width=True):
     stocks = groups[selected_scan_group]
     total_stocks = len(stocks)
     
@@ -194,64 +210,74 @@ if st.button("🚀 今すぐ高速スキャンを実行（一括通信）", use_
         st.warning(f"「{selected_scan_group}」には銘柄が登録されていません。")
     else:
         status_text = st.empty()
-        status_text.info(f"⚡ 全 {total_stocks} 銘柄のデータを一括通信で取得中...")
+        progress_bar = st.progress(0)
         
         ticker_list = [s["ticker"] for s in stocks]
         name_map = {s["ticker"]: s["name"] for s in stocks}
         
-        # 1. 全銘柄の株価・出来高を「1回の通信」でまとめてダウンロード
-        downloaded_data = yf.download(tickers=ticker_list, period="10d", group_by="ticker", progress=False)
+        # Step 1: 発行済株式数を安全に準備
+        status_text.info(f"1/2: 発行済株式数データの準備中...（全 {total_stocks} 銘柄）")
+        shares_map = fetch_shares_outstanding_batch(tuple(ticker_list))
         
         results = []
         alert_count = 0
-        progress_bar = st.progress(0)
         
-        # 2. 取得データの解析
-        for i, ticker in enumerate(ticker_list):
-            progress_bar.progress((i + 1) / total_stocks)
-            name = name_map[ticker]
+        # Step 2: 200銘柄ずつのチャンク（小分け）通信で株価データ取得
+        status_text.info(f"2/2: 株価・出来高データを安全に一括取得中...")
+        
+        total_chunks = (total_stocks + CHUNK_SIZE - 1) // CHUNK_SIZE
+        
+        for c_idx in range(total_chunks):
+            chunk_tickers = ticker_list[c_idx * CHUNK_SIZE : (c_idx + 1) * CHUNK_SIZE]
             
             try:
-                # 複数銘柄と1銘柄でDataFrame構造が変わる対策
-                if len(ticker_list) == 1:
-                    stock_hist = downloaded_data
-                else:
-                    stock_hist = downloaded_data[ticker]
+                # 200銘柄まとめて1回の通信
+                downloaded = yf.download(tickers=chunk_tickers, period="10d", group_by="ticker", progress=False)
                 
-                stock_hist = stock_hist.dropna(subset=['Volume', 'Close'])
-                if stock_hist.empty:
-                    continue
-                
-                # 発行済株式数はキャッシュから高速取得
-                shares_outstanding = get_shares_outstanding_cached(ticker)
-                if not shares_outstanding or shares_outstanding <= 0:
-                    continue
-                
-                recent_history = stock_hist.tail(5)
-                
-                for idx, row in recent_history.iterrows():
-                    daily_volume = row['Volume']
-                    close_price = row['Close']
-                    date_str = idx.strftime('%Y/%m/%d')
-                    turnover_rate = (daily_volume / shares_outstanding) * 100
+                for ticker in chunk_tickers:
+                    name = name_map[ticker]
+                    shares_outstanding = shares_map.get(ticker)
                     
-                    market_cap_oku = int(round((close_price * shares_outstanding) / 100_000_000))
+                    if not shares_outstanding or shares_outstanding <= 0:
+                        continue
                     
-                    if turnover_rate >= threshold_percent:
-                        alert_count += 1
-                        results.append({
-                            "日付": date_str,
-                            "コード": ticker,
-                            "銘柄名": name,
-                            "回転率 (%)": round(turnover_rate, 2),
-                            "時価総額（億円）": f"{market_cap_oku:,}",
-                            "発行済株式数": f"{shares_outstanding:,}",
-                            "株価（円）": round(close_price, 1)
-                        })
-            except Exception:
+                    if len(chunk_tickers) == 1:
+                        stock_hist = downloaded
+                    else:
+                        stock_hist = downloaded.get(ticker)
+                    
+                    if stock_hist is None or stock_hist.empty:
+                        continue
+                    
+                    stock_hist = stock_hist.dropna(subset=['Volume', 'Close'])
+                    recent_history = stock_hist.tail(5)
+                    
+                    for idx, row in recent_history.iterrows():
+                        daily_volume = float(row['Volume'])
+                        close_price = float(row['Close'])
+                        date_str = idx.strftime('%Y/%m/%d')
+                        turnover_rate = (daily_volume / shares_outstanding) * 100
+                        
+                        market_cap_oku = int(round((close_price * shares_outstanding) / 100_000_000))
+                        
+                        if turnover_rate >= threshold_percent:
+                            alert_count += 1
+                            results.append({
+                                "日付": date_str,
+                                "コード": ticker,
+                                "銘柄名": name,
+                                "回転率 (%)": round(turnover_rate, 2),
+                                "時価総額（億円）": f"{market_cap_oku:,}",
+                                "発行済株式数": f"{int(shares_outstanding):,}",
+                                "株価（円）": round(close_price, 1)
+                            })
+            except Exception as e:
                 pass
+            
+            progress_bar.progress((c_idx + 1) / total_chunks)
+            time.sleep(0.5) # BAN回避用ウェイト
         
-        status_text.text("すべての解析が完了しました！")
+        status_text.text("すべてのスキャンが完了しました！")
         
         if results:
             st.success(f"スキャン完了！ 計 {alert_count} 件の過熱（閾値超え）が発見されました。")
