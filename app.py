@@ -47,14 +47,28 @@ def save_groups(groups):
 # --- 3. 画面UIと処理 ---
 st.title("🚀 株式回転率チェッカー")
 
-# ★ スマホでもカラムの縦落ちを防止して1行横並びを強制するCSS設定
+# ★ 強力CSS：スマホ画面でのカラム縦落ち（折り返し）を完全に強制禁止
 st.markdown("""
 <style>
-/* カラムがスマホ画面で縦積みに折り返されるのを防止 */
+/* 1. スマホでもカラムを絶対に折り返さず1行に保持 */
 div[data-testid="stHorizontalBlock"] {
+    display: flex !important;
     flex-direction: row !important;
+    flex-wrap: nowrap !important;
     align-items: center !important;
-    gap: 0.5rem !important;
+}
+
+/* 2. カラムの最小幅制限を解除（狭い画面での強制改行を防止） */
+div[data-testid="column"] {
+    min-width: 0 !important;
+}
+
+/* 3. 銘柄一覧部分のボタンの高さを小さく調整 */
+div[data-testid="column"] button {
+    padding: 0px 8px !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    line-height: 1 !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -96,14 +110,14 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
     st.markdown(f"**現在の「{active_group}」の登録一覧 (計 {len(groups[active_group])} 銘柄)**")
     
-    # ★ 完全1行固定・モノクロ「✕」ボタン配置
+    # ★ 完全1行・右側モノクロ「✕」ボタン配置
     if groups[active_group]:
         for idx, item in enumerate(groups[active_group]):
             c1, c2 = st.columns([8, 2], vertical_alignment="center")
             with c1:
                 st.markdown(f"`{item['ticker']}` {item['name']}")
             with c2:
-                if st.button("✕", key=f"del_{active_group}_{idx}_{item['ticker']}", use_container_width=True):
+                if st.button("✕", key=f"del_{active_group}_{idx}_{item['ticker']}"):
                     deleted_name = groups[active_group].pop(idx)['name']
                     save_groups(groups)
                     st.success(f"「{deleted_name}」を削除しました！")
