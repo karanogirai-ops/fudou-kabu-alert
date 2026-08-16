@@ -5,13 +5,20 @@ import csv
 import datetime
 import time
 import json
-import os
+from supabase import create_client, Client
 
-# --- 1. 設定 ---
-SLEEP_TIME = 0.5         # YahooからBANされないための待機時間（秒）
-DATA_FILE = "groups.json" # 全端末共有のデータ保存ファイル
+# --- 1. 設定 & Supabase接続 ---
+SLEEP_TIME = 0.5
 
-# --- 2. 永続化（データ読み書き）関数 ---
+@st.cache_resource
+def init_supabase() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+supabase = init_supabase()
+
+# --- 2. 永続化（Supabaseデータベース読み書き）関数 ---
 def load_default_stocks():
     stocks = []
     try:
@@ -27,23 +34,28 @@ def load_default_stocks():
     return stocks
 
 def load_groups():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
+    """Supabaseからグループデータを取得"""
+    try:
+        response = supabase.table("app_data").select("data").eq("id", "stock_groups").execute()
+        if response.data:
+            return response.data[0]["data"]
+    except Exception as e:
+        st.error(f"データ取得エラー: {e}")
     
+    # データが存在しない場合は初期データを作成して保存
     initial_groups = {"基本グループ": load_default_stocks()}
     save_groups(initial_groups)
     return initial_groups
 
 def save_groups(groups):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(groups, f, ensure_ascii=False, indent=2)
+    """Supabaseへグループデータを保存"""
+    try:
+        supabase.table("app_data").upsert({"id": "stock_groups", "data": groups}).execute()
+    except Exception as e:
+        st.error(f"データ保存エラー: {e}")
 
 # --- 3. 画面UIと処理 ---
-st.title("🚀 株式回転率チェッカー（直近5営業日対応版）")
+st.title("🚀 株式回転率チェッカー（Supabase永続化対応）")
 
 groups = load_groups()
 
@@ -177,7 +189,6 @@ if st.button("今すぐスキャンを実行（直近5営業日）", use_contain
             
             try:
                 stock = yf.Ticker(ticker)
-                # 念のため過去10日分取得し、有効な直近5営業日分を抽出
                 history = stock.history(period="10d")
                 
                 if history.empty:
@@ -188,7 +199,6 @@ if st.button("今すぐスキャンを実行（直近5営業日）", use_contain
                 if shares_outstanding is None or shares_outstanding <= 0:
                     continue 
                 
-                # 直近最大5営業日のデータを判定
                 recent_history = history.tail(5)
                 
                 for idx, row in recent_history.iterrows():
@@ -215,7 +225,6 @@ if st.button("今すぐスキャンを実行（直近5営業日）", use_contain
         if results:
             st.success(f"スキャン完了！ 直近5営業日の中で計 {alert_count} 件の過熱（閾値超え）が発見されました。")
             df_results = pd.DataFrame(results)
-            # 日付の新しい順（降順）にソートして表示
             df_results = df_results.sort_values("日付", ascending=False)
             st.dataframe(df_results, use_container_width=True, hide_index=True)
         else:
