@@ -13,7 +13,6 @@ def get_supabase_config():
     url = st.secrets["SUPABASE_URL"].rstrip("/")
     key = st.secrets["SUPABASE_KEY"].strip()
     
-    # URLが末尾にrest/v1を含んでいない場合は正しく補正
     if not url.endswith("/rest/v1"):
         rest_url = f"{url}/rest/v1"
     else:
@@ -58,7 +57,6 @@ def load_groups():
     except Exception as e:
         st.error(f"データ取得エラー: {e}")
     
-    # データが存在しないかエラー時は初期データを作成して保存
     initial_groups = {"基本グループ": load_default_stocks()}
     save_groups(initial_groups)
     return initial_groups
@@ -72,7 +70,6 @@ def save_groups(groups):
             "id": "stock_groups",
             "data": groups
         }
-        # upsert処理 (id重複時は上書き)
         headers_upsert = headers.copy()
         headers_upsert["Prefer"] = "resolution=merge-duplicates"
         
@@ -231,16 +228,23 @@ if st.button("今すぐスキャンを実行（直近5営業日）", use_contain
                 
                 for idx, row in recent_history.iterrows():
                     daily_volume = row['Volume']
+                    close_price = row['Close']
                     date_str = idx.strftime('%Y/%m/%d')
                     turnover_rate = (daily_volume / shares_outstanding) * 100
+                    
+                    # 株価 × 発行済株式数（円 → 億円単位換算）
+                    market_cap_oku = (close_price * shares_outstanding) / 100_000_000
                     
                     if turnover_rate >= threshold_percent:
                         alert_count += 1
                         results.append({
                             "日付": date_str,
-                            "銘柄名": name,
                             "コード": ticker,
+                            "銘柄名": name,
+                            "株価（円）": round(close_price, 1),
                             "回転率 (%)": round(turnover_rate, 2),
+                            "時価総額（億円）": f"{round(market_cap_oku, 1):,}",
+                            "発行済株式数": f"{shares_outstanding:,}"
                         })
                 
             except Exception:
