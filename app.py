@@ -1,14 +1,13 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import csv
 import datetime
 import time
 import requests
 
-# --- 1. 設定 & Supabase REST API設定 ---
-CHUNK_SIZE = 200  # 200銘柄ずつ小分け処理
+CHUNK_SIZE = 200
 
+# --- 1. Supabase REST API設定 ---
 def get_supabase_config():
     url = st.secrets["SUPABASE_URL"].rstrip("/")
     key = st.secrets["SUPABASE_KEY"].strip()
@@ -26,36 +25,6 @@ def get_supabase_config():
     }
     return rest_url, headers
 
-# --- 2. 銘柄ごとの個別高速キャッシュ関数 ---
-@st.cache_data(ttl=86400)
-def get_single_shares_outstanding(ticker):
-    """銘柄ごとに24時間キャッシュ（失敗時はNone）"""
-    try:
-        stock = yf.Ticker(ticker)
-        s_out = stock.fast_info.get('shares_outstanding')
-        if not s_out:
-            s_out = stock.info.get('sharesOutstanding')
-        if s_out and s_out > 0:
-            return float(s_out)
-    except Exception:
-        pass
-    return None
-
-# --- 3. 永続化（Supabase REST API読み書き）関数 ---
-def load_default_stocks():
-    stocks = []
-    try:
-        with open("stocks.csv", "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                stocks.append({
-                    "ticker": row["Ticker"],
-                    "name": row["Name"]
-                })
-    except Exception:
-        pass
-    return stocks
-
 def load_groups():
     try:
         rest_url, headers = get_supabase_config()
@@ -68,123 +37,100 @@ def load_groups():
                 return data[0]["data"]
     except Exception as e:
         st.error(f"データ取得エラー: {e}")
-    
-    initial_groups = {"基本グループ": load_default_stocks()}
-    save_groups(initial_groups)
-    return initial_groups
+    return {}
 
 def save_groups(groups):
     try:
         rest_url, headers = get_supabase_config()
         endpoint = f"{rest_url}/app_data"
-        payload = {
-            "id": "stock_groups",
-            "data": groups
-        }
+        payload = {"id": "stock_groups", "data": groups}
         headers_upsert = headers.copy()
         headers_upsert["Prefer"] = "resolution=merge-duplicates"
-        
-        res = requests.post(endpoint, json=payload, headers=headers_upsert, timeout=10)
+        requests.post(endpoint, json=payload, headers=headers_upsert, timeout=10)
     except Exception as e:
         st.error(f"データ保存エラー: {e}")
 
-# --- 4. 画面UIと処理 ---
-st.title("🚀 株式回転率チェッカー（高速・安定スキャン版）")
+# --- 2. stocks.csv の読み込み ---
+@st.cache_data
+def load_csv_master():
+    try:
+        df = pd.read_csv("stocks.csv", encoding="utf-8")
+    except UnicodeDecodeError:
+        df = pd.read_csv("stocks.csv", encoding="cp932")
+    return df
 
+# --- 3. キャッシュ付き発行済株式数取得 ---
+@st.cache_data(ttl=86400)
+def get_shares_outstanding(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        s_out = stock.fast_info.get('shares_outstanding')
+        if not s_out:
+            s_out = stock.info.get('sharesOutstanding')
+        if s_out and s_out > 0:
+            return float(s_out)
+    except Exception:
+        pass
+    return None
+
+# --- 4. 画面UIと処理 ---
+st.title("🚀 株式回転率チェッカー（17seg業種別対応）")
+
+csv_df = load_csv_master()
 groups = load_groups()
 
-# ★ グループ＆銘柄の管理セクション
-with st.expander("⚙️ グループの作成・名前変更・銘柄管理", expanded=False):
+# ★ 検索モード選択
+st.markdown("### 🎯 検索モードの選択")
+search_mode = st.radio(
+    "スキャン方法を選んでください:",
+    ["🏢 17業種区分（17seg-Name）でスキャン", "🏷️ 市場区分（Categoy）でスキャン", "📁 カスタムグループ（Supabase保存）でスキャン"],
+    horizontal=True
+)
+
+target_stocks = []
+
+if search_mode == "🏢 17業種区分（17seg-Name）でスキャン":
+    # "-"（ハイフン/未分類）を除外した17業種リストを作成
+    valid_17seg_df = csv_df[csv_df["17seg-Name"].astype(str).str.strip() != "-"]
+    unique_17seg = sorted([str(x) for x in valid_17seg_df["17seg-Name"].dropna().unique()])
     
-    new_group_name = st.text_input("新しいグループを作成（例: 東証全銘柄）", key="new_group_input")
-    if st.button("グループを作成", use_container_width=True):
-        if new_group_name and new_group_name not in groups:
-            groups[new_group_name] = []
-            save_groups(groups)
-            st.success(f"グループ「{new_group_name}」を作成・保存しました！")
-            st.rerun()
-        elif new_group_name in groups:
-            st.warning("そのグループ名は既に存在します。")
-
-    st.divider()
-
-    group_names = list(groups.keys())
-    active_group = st.selectbox("編集対象のグループを選択", group_names)
+    selected_17seg = st.selectbox("17業種（17seg-Name）を選択", unique_17seg)
+    filtered_df = csv_df[csv_df["17seg-Name"] == selected_17seg]
     
-    rename_group_input = st.text_input("選択中グループの名前を変更", value=active_group, key=f"rename_{active_group}")
-    if st.button("名前を変更", use_container_width=True):
-        if rename_group_input and rename_group_input != active_group:
-            if rename_group_input in groups:
-                st.warning("そのグループ名は既に存在します。")
-            else:
-                groups[rename_group_input] = groups.pop(active_group)
-                save_groups(groups)
-                st.success(f"「{active_group}」を「{rename_group_input}」に変更・保存しました！")
-                st.rerun()
-
-    st.markdown(f"**現在の「{active_group}」の登録一覧 (計 {len(groups[active_group])} 銘柄)**")
+    st.info(f"選択中: **{selected_17seg}** （該当: **{len(filtered_df)}** 銘柄）")
     
-    if groups[active_group]:
-        df_display = pd.DataFrame(groups[active_group])
-        df_display.columns = ["コード", "銘柄名"]
-        st.dataframe(df_display, use_container_width=True, hide_index=True)
+    for _, row in filtered_df.iterrows():
+        target_stocks.append({
+            "ticker": str(row["Ticker"]),
+            "name": str(row["Name"])
+        })
 
-        delete_options = [f"{item['ticker']} | {item['name']}" for item in groups[active_group]]
-        selected_to_delete = st.selectbox("🗑️ 削除したい銘柄を選択", delete_options, key=f"del_select_{active_group}")
-        
-        if st.button("選択した銘柄を削除", use_container_width=True):
-            target_ticker = selected_to_delete.split(" | ")[0]
-            groups[active_group] = [item for item in groups[active_group] if item["ticker"] != target_ticker]
-            save_groups(groups)
-            st.success("削除して保存しました！")
-            st.rerun()
+elif search_mode == "🏷️ 市場区分（Categoy）でスキャン":
+    unique_categoy = sorted([str(x) for x in csv_df["Categoy"].dropna().unique()])
+    selected_categoy = st.selectbox("市場区分（Categoy）を選択", unique_categoy)
+    filtered_df = csv_df[csv_df["Categoy"] == selected_categoy]
+    
+    st.info(f"選択中: **{selected_categoy}** （該当: **{len(filtered_df)}** 銘柄）")
+    
+    for _, row in filtered_df.iterrows():
+        target_stocks.append({
+            "ticker": str(row["Ticker"]),
+            "name": str(row["Name"])
+        })
+
+else:
+    # カスタムグループ検索
+    group_names = list(groups.keys()) if groups else []
+    if not group_names:
+        st.warning("カスタムグループが登録されていません。下の設定画面から作成してください。")
     else:
-        st.info("このグループには銘柄が登録されていません。")
-
-    st.divider()
-
-    st.markdown("**📥 CSV/コピペから一括追加**")
-    bulk_input = st.text_area(
-        "JPXのExcel/CSV等から「コード, 銘柄名」をコピペしてください:", 
-        height=140
-    )
-    
-    if st.button("このグループに一括追加", use_container_width=True):
-        if bulk_input:
-            lines = bulk_input.strip().split("\n")
-            added_count = 0
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = [p.strip() for p in line.split(",")]
-                raw_ticker = parts[0]
-                name = parts[1] if len(parts) > 1 else raw_ticker
-                
-                formatted_ticker = raw_ticker.upper() if raw_ticker.endswith(".T") else f"{raw_ticker}.T"
-                
-                groups[active_group].append({
-                    "ticker": formatted_ticker,
-                    "name": name
-                })
-                added_count += 1
-            
-            save_groups(groups)
-            st.success(f"「{active_group}」に {added_count} 件の銘柄を追加・保存しました！")
-            st.rerun()
-
-    if active_group != "基本グループ":
-        if st.button(f"🗑️ 「{active_group}」グループごと削除", use_container_width=True):
-            del groups[active_group]
-            save_groups(groups)
-            st.success(f"グループ「{active_group}」を削除しました。")
-            st.rerun()
+        selected_group_name = st.selectbox("グループを選択", group_names)
+        target_stocks = groups[selected_group_name]
+        st.info(f"選択中: **{selected_group_name}** （該当: **{len(target_stocks)}** 銘柄）")
 
 st.divider()
 
-# ★ 超高速・リアルタイムプログレス対応スキャン
-selected_scan_group = st.selectbox("🎯 スキャンを実行するグループを選択", list(groups.keys()))
-
+# ★ スキャン設定
 threshold_percent = st.number_input(
     "アラートを出す回転率の閾値（%）",
     min_value=1.0,
@@ -193,18 +139,17 @@ threshold_percent = st.number_input(
     step=1.0
 )
 
-if st.button("🚀 スキャンを実行する", use_container_width=True):
-    stocks = groups[selected_scan_group]
-    total_stocks = len(stocks)
+if st.button("🚀 今すぐスキャンを実行する", use_container_width=True):
+    total_stocks = len(target_stocks)
     
     if total_stocks == 0:
-        st.warning(f"「{selected_scan_group}」には銘柄が登録されていません。")
+        st.warning("対象となる銘柄がありません。")
     else:
         status_text = st.empty()
         progress_bar = st.progress(0)
         
-        ticker_list = [s["ticker"] for s in stocks]
-        name_map = {s["ticker"]: s["name"] for s in stocks}
+        ticker_list = [s["ticker"] for s in target_stocks]
+        name_map = {s["ticker"]: s["name"] for s in target_stocks}
         
         results = []
         alert_count = 0
@@ -215,10 +160,9 @@ if st.button("🚀 スキャンを実行する", use_container_width=True):
             chunk_tickers = ticker_list[c_idx * CHUNK_SIZE : (c_idx + 1) * CHUNK_SIZE]
             current_processed = min((c_idx + 1) * CHUNK_SIZE, total_stocks)
             
-            status_text.info(f"スキャン進行中... {current_processed} / {total_stocks} 銘柄完了（グループ {c_idx + 1}/{total_chunks}）")
+            status_text.info(f"スキャン進行中... {current_processed} / {total_stocks} 銘柄完了（{c_idx + 1}/{total_chunks}）")
             
             try:
-                # 200銘柄まとめて株価・出来高を一括取得
                 downloaded = yf.download(tickers=chunk_tickers, period="10d", group_by="ticker", progress=False)
                 
                 for ticker in chunk_tickers:
@@ -235,12 +179,10 @@ if st.button("🚀 スキャンを実行する", use_container_width=True):
                     stock_hist = stock_hist.dropna(subset=['Volume', 'Close'])
                     recent_history = stock_hist.tail(5)
                     
-                    # 直近で全く取引（Volume）がない場合はスキップして通信・処理を高速化
                     if recent_history['Volume'].sum() <= 0:
                         continue
                     
-                    # 必要時のみ発行済株式数を取得（24時間キャッシュ）
-                    shares_outstanding = get_single_shares_outstanding(ticker)
+                    shares_outstanding = get_shares_outstanding(ticker)
                     if not shares_outstanding or shares_outstanding <= 0:
                         continue
                     
@@ -266,9 +208,8 @@ if st.button("🚀 スキャンを実行する", use_container_width=True):
             except Exception:
                 pass
             
-            # プログレスバーを更新
             progress_bar.progress((c_idx + 1) / total_chunks)
-            time.sleep(0.3)
+            time.sleep(0.2)
         
         status_text.text("すべてのスキャンが完了しました！")
         
@@ -279,3 +220,49 @@ if st.button("🚀 スキャンを実行する", use_container_width=True):
             st.dataframe(df_results, use_container_width=True, hide_index=True)
         else:
             st.info(f"スキャン完了！ 閾値（{threshold_percent}%）を超えた銘柄はありませんでした。")
+
+st.divider()
+
+# ★ カスタムグループ管理（折りたたみ）
+with st.expander("⚙️ カスタムグループの作成・編集（Supabase保存）", expanded=False):
+    new_group_name = st.text_input("新しいグループを作成", key="new_group_input")
+    if st.button("グループを作成", use_container_width=True):
+        if new_group_name and new_group_name not in groups:
+            groups[new_group_name] = []
+            save_groups(groups)
+            st.success(f"グループ「{new_group_name}」を作成しました！")
+            st.rerun()
+        elif new_group_name in groups:
+            st.warning("そのグループ名は既に存在します。")
+
+    if groups:
+        st.divider()
+        active_group = st.selectbox("編集対象グループを選択", list(groups.keys()))
+        
+        st.markdown(f"**現在の「{active_group}」の登録一覧 (計 {len(groups[active_group])} 銘柄)**")
+        if groups[active_group]:
+            df_display = pd.DataFrame(groups[active_group])
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
+            
+            delete_options = [f"{item['ticker']} | {item['name']}" for item in groups[active_group]]
+            selected_to_delete = st.selectbox("🗑️ 削除したい銘柄を選択", delete_options)
+            if st.button("選択した銘柄を削除", use_container_width=True):
+                target_ticker = selected_to_delete.split(" | ")[0]
+                groups[active_group] = [item for item in groups[active_group] if item["ticker"] != target_ticker]
+                save_groups(groups)
+                st.success("削除しました！")
+                st.rerun()
+
+        st.divider()
+        bulk_input = st.text_area("コピペで一括追加（コード, 銘柄名）:", height=100)
+        if st.button("一括追加", use_container_width=True):
+            if bulk_input:
+                for line in bulk_input.strip().split("\n"):
+                    parts = [p.strip() for p in line.split(",")]
+                    if parts[0]:
+                        t = parts[0].upper() if parts[0].endswith(".T") else f"{parts[0]}.T"
+                        n = parts[1] if len(parts) > 1 else t
+                        groups[active_group].append({"ticker": t, "name": n})
+                save_groups(groups)
+                st.success("追加しました！")
+                st.rerun()
