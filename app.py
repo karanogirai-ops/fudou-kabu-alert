@@ -4,21 +4,30 @@ import pandas as pd
 import csv
 import datetime
 import time
-import json
-from supabase import create_client, Client
+import requests
 
-# --- 1. 設定 & Supabase接続 ---
+# --- 1. 設定 & Supabase REST API設定 ---
 SLEEP_TIME = 0.5
 
-@st.cache_resource
-def init_supabase() -> Client:
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+def get_supabase_config():
+    url = st.secrets["SUPABASE_URL"].rstrip("/")
+    key = st.secrets["SUPABASE_KEY"].strip()
+    
+    # URLが末尾にrest/v1を含んでいない場合は正しく補正
+    if not url.endswith("/rest/v1"):
+        rest_url = f"{url}/rest/v1"
+    else:
+        rest_url = url
+        
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+    return rest_url, headers
 
-supabase = init_supabase()
-
-# --- 2. 永続化（Supabaseデータベース読み書き）関数 ---
+# --- 2. 永続化（Supabase REST API読み書き）関数 ---
 def load_default_stocks():
     stocks = []
     try:
@@ -34,23 +43,42 @@ def load_default_stocks():
     return stocks
 
 def load_groups():
-    """Supabaseからグループデータを取得"""
+    """Supabase REST APIからグループデータを取得"""
     try:
-        response = supabase.table("app_data").select("data").eq("id", "stock_groups").execute()
-        if response.data:
-            return response.data[0]["data"]
+        rest_url, headers = get_supabase_config()
+        endpoint = f"{rest_url}/app_data?id=eq.stock_groups&select=data"
+        res = requests.get(endpoint, headers=headers, timeout=10)
+        
+        if res.status_code == 200:
+            data = res.json()
+            if data and len(data) > 0 and "data" in data[0]:
+                return data[0]["data"]
+        else:
+            st.error(f"データ取得エラー ({res.status_code}): {res.text}")
     except Exception as e:
         st.error(f"データ取得エラー: {e}")
     
-    # データが存在しない場合は初期データを作成して保存
+    # データが存在しないかエラー時は初期データを作成して保存
     initial_groups = {"基本グループ": load_default_stocks()}
     save_groups(initial_groups)
     return initial_groups
 
 def save_groups(groups):
-    """Supabaseへグループデータを保存"""
+    """Supabase REST APIへグループデータを保存"""
     try:
-        supabase.table("app_data").upsert({"id": "stock_groups", "data": groups}).execute()
+        rest_url, headers = get_supabase_config()
+        endpoint = f"{rest_url}/app_data"
+        payload = {
+            "id": "stock_groups",
+            "data": groups
+        }
+        # upsert処理 (id重複時は上書き)
+        headers_upsert = headers.copy()
+        headers_upsert["Prefer"] = "resolution=merge-duplicates"
+        
+        res = requests.post(endpoint, json=payload, headers=headers_upsert, timeout=10)
+        if res.status_code not in [200, 201, 204]:
+            st.error(f"データ保存エラー ({res.status_code}): {res.text}")
     except Exception as e:
         st.error(f"データ保存エラー: {e}")
 
