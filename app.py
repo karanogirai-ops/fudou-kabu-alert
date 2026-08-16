@@ -84,14 +84,14 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
     st.markdown(f"**現在の「{active_group}」の登録一覧 (計 {len(groups[active_group])} 銘柄)**")
     
-    # ★ 1行・超コンパクト表示（スマホ最適化）
+    # ★ 横並び・高さを揃えたモノクロ削除ボタン配置
     if groups[active_group]:
         for idx, item in enumerate(groups[active_group]):
-            c1, c2 = st.columns([5, 1])
+            c1, c2 = st.columns([8, 2], vertical_alignment="center")
             with c1:
-                st.write(f"`{item['ticker']}` {item['name']}")
+                st.markdown(f"`{item['ticker']}` {item['name']}")
             with c2:
-                if st.button("❌", key=f"del_{active_group}_{idx}_{item['ticker']}"):
+                if st.button("✕", key=f"del_{active_group}_{idx}_{item['ticker']}", use_container_width=True):
                     deleted_name = groups[active_group].pop(idx)['name']
                     save_groups(groups)
                     st.success(f"「{deleted_name}」を削除しました！")
