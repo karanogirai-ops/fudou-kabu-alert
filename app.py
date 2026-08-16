@@ -232,8 +232,8 @@ if st.button("今すぐスキャンを実行（直近5営業日）", use_contain
                     date_str = idx.strftime('%Y/%m/%d')
                     turnover_rate = (daily_volume / shares_outstanding) * 100
                     
-                    # 株価 × 発行済株式数（円 → 億円単位換算）
-                    market_cap_oku = (close_price * shares_outstanding) / 100_000_000
+                    # 株価 × 発行済株式数（円 → 億円単位換算、整数表示）
+                    market_cap_oku = int(round((close_price * shares_outstanding) / 100_000_000))
                     
                     if turnover_rate >= threshold_percent:
                         alert_count += 1
@@ -243,7 +243,7 @@ if st.button("今すぐスキャンを実行（直近5営業日）", use_contain
                             "銘柄名": name,
                             "株価（円）": round(close_price, 1),
                             "回転率 (%)": round(turnover_rate, 2),
-                            "時価総額（億円）": f"{round(market_cap_oku, 1):,}",
+                            "時価総額（億円）": f"{market_cap_oku:,}",
                             "発行済株式数": f"{shares_outstanding:,}"
                         })
                 
