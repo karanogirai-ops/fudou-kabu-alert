@@ -53,7 +53,7 @@ groups = load_groups()
 # ★ グループ＆銘柄の管理セクション
 with st.expander("⚙️ グループの作成・名前変更・銘柄管理", expanded=False):
     
-    # 1. 新規グループの作成（スマホ対応：ボタン全幅化）
+    # 1. 新規グループの作成
     new_group_name = st.text_input("新しいグループを作成（例: プライム100社）", key="new_group_input")
     if st.button("グループを作成", use_container_width=True):
         if new_group_name and new_group_name not in groups:
@@ -70,7 +70,7 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
     group_names = list(groups.keys())
     active_group = st.selectbox("編集対象のグループを選択", group_names)
     
-    # 3. グループ名の変更機能（スマホ対応：ボタン全幅化）
+    # 3. グループ名の変更機能
     rename_group_input = st.text_input("選択中グループの名前を変更", value=active_group, key=f"rename_{active_group}")
     if st.button("名前を変更", use_container_width=True):
         if rename_group_input and rename_group_input != active_group:
@@ -84,19 +84,18 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
     st.markdown(f"**現在の「{active_group}」の登録一覧 (計 {len(groups[active_group])} 銘柄)**")
     
-    # ★ スマホ最適化：銘柄情報と削除ボタンを2列（3:1）でスマートに配置
+    # ★ 1行・超コンパクト表示（スマホ最適化）
     if groups[active_group]:
         for idx, item in enumerate(groups[active_group]):
-            c1, c2 = st.columns([3, 1])
+            c1, c2 = st.columns([5, 1])
             with c1:
-                st.markdown(f"**{item['name']}**\n`{item['ticker']}`")
+                st.write(f"`{item['ticker']}` {item['name']}")
             with c2:
-                if st.button("削除", key=f"del_{active_group}_{idx}_{item['ticker']}", use_container_width=True):
+                if st.button("❌", key=f"del_{active_group}_{idx}_{item['ticker']}"):
                     deleted_name = groups[active_group].pop(idx)['name']
                     save_groups(groups)
                     st.success(f"「{deleted_name}」を削除しました！")
                     st.rerun()
-            st.divider()
     else:
         st.info("このグループには銘柄が登録されていません。")
 
