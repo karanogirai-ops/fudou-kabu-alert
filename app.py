@@ -7,8 +7,6 @@ import time
 import requests
 
 # --- 1. 設定 & Supabase REST API設定 ---
-SLEEP_TIME = 0.5
-
 def get_supabase_config():
     url = st.secrets["SUPABASE_URL"].rstrip("/")
     key = st.secrets["SUPABASE_KEY"].strip()
@@ -26,7 +24,17 @@ def get_supabase_config():
     }
     return rest_url, headers
 
-# --- 2. 永続化（Supabase REST API読み書き）関数 ---
+# --- 2. キャッシュ機能付き一括データ取得 ---
+@st.cache_data(ttl=86400)
+def get_shares_outstanding_cached(ticker):
+    """発行済株式数は変化が少ないため、24時間(86400秒)キャッシュして通信削減"""
+    try:
+        stock = yf.Ticker(ticker)
+        return stock.info.get('sharesOutstanding')
+    except Exception:
+        return None
+
+# --- 3. 永続化（Supabase REST API読み書き）関数 ---
 def load_default_stocks():
     stocks = []
     try:
@@ -42,7 +50,6 @@ def load_default_stocks():
     return stocks
 
 def load_groups():
-    """Supabase REST APIからグループデータを取得"""
     try:
         rest_url, headers = get_supabase_config()
         endpoint = f"{rest_url}/app_data?id=eq.stock_groups&select=data"
@@ -52,8 +59,6 @@ def load_groups():
             data = res.json()
             if data and len(data) > 0 and "data" in data[0]:
                 return data[0]["data"]
-        else:
-            st.error(f"データ取得エラー ({res.status_code}): {res.text}")
     except Exception as e:
         st.error(f"データ取得エラー: {e}")
     
@@ -62,7 +67,6 @@ def load_groups():
     return initial_groups
 
 def save_groups(groups):
-    """Supabase REST APIへグループデータを保存"""
     try:
         rest_url, headers = get_supabase_config()
         endpoint = f"{rest_url}/app_data"
@@ -74,21 +78,18 @@ def save_groups(groups):
         headers_upsert["Prefer"] = "resolution=merge-duplicates"
         
         res = requests.post(endpoint, json=payload, headers=headers_upsert, timeout=10)
-        if res.status_code not in [200, 201, 204]:
-            st.error(f"データ保存エラー ({res.status_code}): {res.text}")
     except Exception as e:
         st.error(f"データ保存エラー: {e}")
 
-# --- 3. 画面UIと処理 ---
-st.title("🚀 株式回転率チェッカー")
+# --- 4. 画面UIと処理 ---
+st.title("🚀 株式回転率チェッカー（超高速一括取得版）")
 
 groups = load_groups()
 
 # ★ グループ＆銘柄の管理セクション
 with st.expander("⚙️ グループの作成・名前変更・銘柄管理", expanded=False):
     
-    # 1. 新規グループの作成
-    new_group_name = st.text_input("新しいグループを作成（例: プライム100社）", key="new_group_input")
+    new_group_name = st.text_input("新しいグループを作成（例: プライム225）", key="new_group_input")
     if st.button("グループを作成", use_container_width=True):
         if new_group_name and new_group_name not in groups:
             groups[new_group_name] = []
@@ -100,11 +101,9 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
     st.divider()
 
-    # 2. 管理対象グループの選択
     group_names = list(groups.keys())
     active_group = st.selectbox("編集対象のグループを選択", group_names)
     
-    # 3. グループ名の変更機能
     rename_group_input = st.text_input("選択中グループの名前を変更", value=active_group, key=f"rename_{active_group}")
     if st.button("名前を変更", use_container_width=True):
         if rename_group_input and rename_group_input != active_group:
@@ -118,7 +117,6 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
     st.markdown(f"**現在の「{active_group}」の登録一覧 (計 {len(groups[active_group])} 銘柄)**")
     
-    # ★ 銘柄一覧表示＆選択削除
     if groups[active_group]:
         df_display = pd.DataFrame(groups[active_group])
         df_display.columns = ["コード", "銘柄名"]
@@ -138,9 +136,7 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
     st.divider()
 
-    # 4. 銘柄の一括追加
     st.markdown("**📥 テキストエリアからコピペで一括追加**")
-    st.caption("改行区切りで「コード, 銘柄名」または「コードのみ」を一括入力できます。")
     bulk_input = st.text_area(
         "入力例:\n7203.T, トヨタ自動車\n9984.T, ソフトバンクG\n\n(コードだけでもOK):\n8306.T\n8316.T", 
         height=140
@@ -170,7 +166,6 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
             st.success(f"「{active_group}」に {added_count} 件の銘柄を追加・保存しました！")
             st.rerun()
 
-    # 5. グループの削除
     if active_group != "基本グループ":
         if st.button(f"🗑️ 「{active_group}」グループごと削除", use_container_width=True):
             del groups[active_group]
@@ -180,7 +175,7 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
 st.divider()
 
-# ★ スキャン設定と実行
+# ★ 超高速一括スキャン設定と実行
 selected_scan_group = st.selectbox("🎯 スキャンを実行するグループを選択", list(groups.keys()))
 
 threshold_percent = st.number_input(
@@ -188,43 +183,51 @@ threshold_percent = st.number_input(
     min_value=1.0,
     max_value=200.0,
     value=5.0,
-    step=1.0,
-    help="直近5営業日のうち、この数値以上の回転率になった日がある銘柄を抽出します。"
+    step=1.0
 )
 
-if st.button("今すぐスキャンを実行（直近5営業日）", use_container_width=True):
+if st.button("🚀 今すぐ高速スキャンを実行（一括通信）", use_container_width=True):
     stocks = groups[selected_scan_group]
     total_stocks = len(stocks)
     
     if total_stocks == 0:
-        st.warning(f"「{selected_scan_group}」には銘柄が登録されていません。上の設定画面から追加してください。")
+        st.warning(f"「{selected_scan_group}」には銘柄が登録されていません。")
     else:
-        progress_bar = st.progress(0)
         status_text = st.empty()
+        status_text.info(f"⚡ 全 {total_stocks} 銘柄のデータを一括通信で取得中...")
+        
+        ticker_list = [s["ticker"] for s in stocks]
+        name_map = {s["ticker"]: s["name"] for s in stocks}
+        
+        # 1. 全銘柄の株価・出来高を「1回の通信」でまとめてダウンロード
+        downloaded_data = yf.download(tickers=ticker_list, period="10d", group_by="ticker", progress=False)
         
         results = []
         alert_count = 0
+        progress_bar = st.progress(0)
         
-        for i, info in enumerate(stocks):
-            ticker = info["ticker"]
-            name = info["name"]
-            
-            status_text.text(f"スキャン中... ({i+1}/{total_stocks}): {name} を確認しています")
+        # 2. 取得データの解析
+        for i, ticker in enumerate(ticker_list):
             progress_bar.progress((i + 1) / total_stocks)
+            name = name_map[ticker]
             
             try:
-                stock = yf.Ticker(ticker)
-                history = stock.history(period="10d")
+                # 複数銘柄と1銘柄でDataFrame構造が変わる対策
+                if len(ticker_list) == 1:
+                    stock_hist = downloaded_data
+                else:
+                    stock_hist = downloaded_data[ticker]
                 
-                if history.empty:
-                    continue 
+                stock_hist = stock_hist.dropna(subset=['Volume', 'Close'])
+                if stock_hist.empty:
+                    continue
                 
-                shares_outstanding = stock.info.get('sharesOutstanding')
+                # 発行済株式数はキャッシュから高速取得
+                shares_outstanding = get_shares_outstanding_cached(ticker)
+                if not shares_outstanding or shares_outstanding <= 0:
+                    continue
                 
-                if shares_outstanding is None or shares_outstanding <= 0:
-                    continue 
-                
-                recent_history = history.tail(5)
+                recent_history = stock_hist.tail(5)
                 
                 for idx, row in recent_history.iterrows():
                     daily_volume = row['Volume']
@@ -245,18 +248,15 @@ if st.button("今すぐスキャンを実行（直近5営業日）", use_contain
                             "発行済株式数": f"{shares_outstanding:,}",
                             "株価（円）": round(close_price, 1)
                         })
-                
             except Exception:
-                pass 
-            
-            time.sleep(SLEEP_TIME)
+                pass
         
-        status_text.text("すべてのスキャンが完了しました！")
+        status_text.text("すべての解析が完了しました！")
         
         if results:
-            st.success(f"スキャン完了！ 直近5営業日の中で計 {alert_count} 件の過熱（閾値超え）が発見されました。")
+            st.success(f"スキャン完了！ 計 {alert_count} 件の過熱（閾値超え）が発見されました。")
             df_results = pd.DataFrame(results)
             df_results = df_results.sort_values("日付", ascending=False)
             st.dataframe(df_results, use_container_width=True, hide_index=True)
         else:
-            st.info(f"スキャン完了！ 直近5営業日の中で閾値（{threshold_percent}%）を超えた銘柄はありませんでした。")
+            st.info(f"スキャン完了！ 閾値（{threshold_percent}%）を超えた銘柄はありませんでした。")
