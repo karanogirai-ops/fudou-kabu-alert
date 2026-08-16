@@ -7,8 +7,7 @@ import time
 import requests
 
 # --- 1. 設定 & Supabase REST API設定 ---
-# 一度に通信する銘柄数（BAN対策として200銘柄ずつ小分け取得）
-CHUNK_SIZE = 200
+CHUNK_SIZE = 200  # 200銘柄ずつ小分け処理
 
 def get_supabase_config():
     url = st.secrets["SUPABASE_URL"].rstrip("/")
@@ -27,7 +26,22 @@ def get_supabase_config():
     }
     return rest_url, headers
 
-# --- 2. 永続化（Supabase REST API読み書き）関数 ---
+# --- 2. 銘柄ごとの個別高速キャッシュ関数 ---
+@st.cache_data(ttl=86400)
+def get_single_shares_outstanding(ticker):
+    """銘柄ごとに24時間キャッシュ（失敗時はNone）"""
+    try:
+        stock = yf.Ticker(ticker)
+        s_out = stock.fast_info.get('shares_outstanding')
+        if not s_out:
+            s_out = stock.info.get('sharesOutstanding')
+        if s_out and s_out > 0:
+            return float(s_out)
+    except Exception:
+        pass
+    return None
+
+# --- 3. 永続化（Supabase REST API読み書き）関数 ---
 def load_default_stocks():
     stocks = []
     try:
@@ -74,31 +88,8 @@ def save_groups(groups):
     except Exception as e:
         st.error(f"データ保存エラー: {e}")
 
-# --- 3. 発行済株式数の一括取得＆キャッシュ（通信激減処理） ---
-@st.cache_data(ttl=86400)
-def fetch_shares_outstanding_batch(ticker_list):
-    """
-    主要銘柄・全銘柄の発行済株式数を可能な限り効率的に取得
-    24時間キャッシュするため、1日1回以上の通信は発生しません
-    """
-    shares_map = {}
-    # 安全のため小分け取得
-    for i in range(0, len(ticker_list), 50):
-        chunk = ticker_list[i:i + 50]
-        for t in chunk:
-            try:
-                stock = yf.Ticker(t)
-                # fast_infoを使うことで低負荷かつ高速に取得
-                s_out = stock.fast_info.get('shares_outstanding') or stock.info.get('sharesOutstanding')
-                if s_out and s_out > 0:
-                    shares_map[t] = s_out
-            except Exception:
-                pass
-        time.sleep(0.2)
-    return shares_map
-
 # --- 4. 画面UIと処理 ---
-st.title("🚀 株式回転率チェッカー（東証全銘柄・極小通信対応）")
+st.title("🚀 株式回転率チェッカー（高速・安定スキャン版）")
 
 groups = load_groups()
 
@@ -191,7 +182,7 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
 st.divider()
 
-# ★ 超安全・超高速スキャン実行
+# ★ 超高速・リアルタイムプログレス対応スキャン
 selected_scan_group = st.selectbox("🎯 スキャンを実行するグループを選択", list(groups.keys()))
 
 threshold_percent = st.number_input(
@@ -202,7 +193,7 @@ threshold_percent = st.number_input(
     step=1.0
 )
 
-if st.button("🛡️ BAN対策スキャンを実行（安全一括取得）", use_container_width=True):
+if st.button("🚀 スキャンを実行する", use_container_width=True):
     stocks = groups[selected_scan_group]
     total_stocks = len(stocks)
     
@@ -215,31 +206,23 @@ if st.button("🛡️ BAN対策スキャンを実行（安全一括取得）", u
         ticker_list = [s["ticker"] for s in stocks]
         name_map = {s["ticker"]: s["name"] for s in stocks}
         
-        # Step 1: 発行済株式数を安全に準備
-        status_text.info(f"1/2: 発行済株式数データの準備中...（全 {total_stocks} 銘柄）")
-        shares_map = fetch_shares_outstanding_batch(tuple(ticker_list))
-        
         results = []
         alert_count = 0
-        
-        # Step 2: 200銘柄ずつのチャンク（小分け）通信で株価データ取得
-        status_text.info(f"2/2: 株価・出来高データを安全に一括取得中...")
         
         total_chunks = (total_stocks + CHUNK_SIZE - 1) // CHUNK_SIZE
         
         for c_idx in range(total_chunks):
             chunk_tickers = ticker_list[c_idx * CHUNK_SIZE : (c_idx + 1) * CHUNK_SIZE]
+            current_processed = min((c_idx + 1) * CHUNK_SIZE, total_stocks)
+            
+            status_text.info(f"スキャン進行中... {current_processed} / {total_stocks} 銘柄完了（グループ {c_idx + 1}/{total_chunks}）")
             
             try:
-                # 200銘柄まとめて1回の通信
+                # 200銘柄まとめて株価・出来高を一括取得
                 downloaded = yf.download(tickers=chunk_tickers, period="10d", group_by="ticker", progress=False)
                 
                 for ticker in chunk_tickers:
                     name = name_map[ticker]
-                    shares_outstanding = shares_map.get(ticker)
-                    
-                    if not shares_outstanding or shares_outstanding <= 0:
-                        continue
                     
                     if len(chunk_tickers) == 1:
                         stock_hist = downloaded
@@ -251,6 +234,15 @@ if st.button("🛡️ BAN対策スキャンを実行（安全一括取得）", u
                     
                     stock_hist = stock_hist.dropna(subset=['Volume', 'Close'])
                     recent_history = stock_hist.tail(5)
+                    
+                    # 直近で全く取引（Volume）がない場合はスキップして通信・処理を高速化
+                    if recent_history['Volume'].sum() <= 0:
+                        continue
+                    
+                    # 必要時のみ発行済株式数を取得（24時間キャッシュ）
+                    shares_outstanding = get_single_shares_outstanding(ticker)
+                    if not shares_outstanding or shares_outstanding <= 0:
+                        continue
                     
                     for idx, row in recent_history.iterrows():
                         daily_volume = float(row['Volume'])
@@ -271,11 +263,12 @@ if st.button("🛡️ BAN対策スキャンを実行（安全一括取得）", u
                                 "発行済株式数": f"{int(shares_outstanding):,}",
                                 "株価（円）": round(close_price, 1)
                             })
-            except Exception as e:
+            except Exception:
                 pass
             
+            # プログレスバーを更新
             progress_bar.progress((c_idx + 1) / total_chunks)
-            time.sleep(0.5) # BAN回避用ウェイト
+            time.sleep(0.3)
         
         status_text.text("すべてのスキャンが完了しました！")
         
