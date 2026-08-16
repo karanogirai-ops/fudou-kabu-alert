@@ -9,7 +9,7 @@ import time
 SLEEP_TIME = 0.5         # YahooからBANされないための待機時間（秒）
 
 # --- 2. 処理関数 ---
-def load_stocks():
+def load_default_stocks():
     stocks = []
     try:
         with open("stocks.csv", "r", encoding="utf-8") as f:
@@ -20,30 +20,73 @@ def load_stocks():
                     "name": row["Name"]
                 })
     except Exception as e:
-        st.error(f"CSVファイルの読み込みエラー: {e}")
+        pass
     return stocks
 
-# --- 3. 画面UIとメイン処理 ---
-st.title("🚀 株式回転率チェッカー（大量スキャン対応版）")
-st.write("ボタンを押すと現在の相場をスキャンし、画面上に結果を表示します。")
-st.caption("※計算基準を「発行済株式数」に変更し、株数の自動取得化を実現しました。")
+# --- 3. セッション状態（画面上のリスト保持）の初期化 ---
+if "stock_list" not in st.session_state:
+    st.session_state.stock_list = load_default_stocks()
 
-# ★ 閾値設定（上限を200.0%に設定）
+# --- 4. 画面UI ---
+st.title("🚀 株式回転率チェッカー")
+st.write("ボタンを押すと現在の相場をスキャンし、画面上に結果を表示します。")
+
+# ★ 銘柄管理セクション（追加・削除機能）
+with st.expander("⚙️ 監視銘柄の追加・削除・確認", expanded=False):
+    st.subheader("現在の監視銘柄リスト")
+    if st.session_state.stock_list:
+        df_list = pd.DataFrame(st.session_state.stock_list)
+        st.dataframe(df_list, use_container_width=True)
+    else:
+        st.write("登録されている銘柄がありません。")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**➕ 銘柄の追加**")
+        new_ticker = st.text_input("銘柄コード（例: 7203.T）", key="add_ticker")
+        new_name = st.text_input("銘柄名（例: トヨタ自動車）", key="add_name")
+        if st.button("銘柄を追加"):
+            if new_ticker and new_name:
+                # 末尾に .T がない場合は自動付与
+                formatted_ticker = new_ticker.upper() if new_ticker.endswith(".T") else f"{new_ticker}.T"
+                st.session_state.stock_list.append({"ticker": formatted_ticker, "name": new_name})
+                st.success(f"{new_name} ({formatted_ticker}) を追加しました！")
+                st.rerun()
+            else:
+                st.warning("コードと名前の両方を入力してください。")
+
+    with col2:
+        st.markdown("**🗑️ 銘柄の削除**")
+        if st.session_state.stock_list:
+            delete_options = [f"{s['name']} ({s['ticker']})" for s in st.session_state.stock_list]
+            selected_to_delete = st.selectbox("削除する銘柄を選択", delete_options)
+            if st.button("選択した銘柄を削除"):
+                st.session_state.stock_list = [
+                    s for s in st.session_state.stock_list 
+                    if f"{s['name']} ({s['ticker']})" != selected_to_delete
+                ]
+                st.success("削除しました！")
+                st.rerun()
+
+st.divider()
+
+# ★ 閾値設定
 threshold_percent = st.number_input(
     "アラートを出す回転率の閾値（%）",
     min_value=1.0,
-    max_value=200.0,  # 上限を200%に変更
-    value=5.0,        # 標準値
-    step=1.0,         # 1ごとに変更
+    max_value=200.0,
+    value=5.0,
+    step=1.0,
     help="この数値以上の回転率になった銘柄を「過熱」として抽出します。"
 )
 
+# ★ スキャン実行
 if st.button("今すぐスキャンを実行"):
-    stocks = load_stocks()
+    stocks = st.session_state.stock_list
     total_stocks = len(stocks)
     
     if total_stocks == 0:
-        st.warning("銘柄リストが空です。stocks.csvを確認してください。")
+        st.warning("銘柄リストが空です。上の設定画面から銘柄を追加してください。")
     else:
         progress_bar = st.progress(0)
         status_text = st.empty()
