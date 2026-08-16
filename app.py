@@ -43,7 +43,7 @@ def save_groups(groups):
         json.dump(groups, f, ensure_ascii=False, indent=2)
 
 # --- 3. 画面UIと処理 ---
-st.title("🚀 株式回転率チェッカー")
+st.title("🚀 株式回転率チェッカー（直近5営業日対応版）")
 
 groups = load_groups()
 
@@ -81,13 +81,12 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
     st.markdown(f"**現在の「{active_group}」の登録一覧 (計 {len(groups[active_group])} 銘柄)**")
     
-    # ★ スマホ画面に100%納まる銘柄一覧表示
+    # ★ 銘柄一覧表示＆選択削除
     if groups[active_group]:
         df_display = pd.DataFrame(groups[active_group])
         df_display.columns = ["コード", "銘柄名"]
         st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-        # ★ 誤入力銘柄の削除機能（選択ドロップダウン方式）
         delete_options = [f"{item['ticker']} | {item['name']}" for item in groups[active_group]]
         selected_to_delete = st.selectbox("🗑️ 削除したい銘柄を選択", delete_options, key=f"del_select_{active_group}")
         
@@ -102,7 +101,7 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
     st.divider()
 
-    # 4. 銘柄の一括追加（テキストエリアでコピペ対応）
+    # 4. 銘柄の一括追加
     st.markdown("**📥 テキストエリアからコピペで一括追加**")
     st.caption("改行区切りで「コード, 銘柄名」または「コードのみ」を一括入力できます。")
     bulk_input = st.text_area(
@@ -153,10 +152,10 @@ threshold_percent = st.number_input(
     max_value=200.0,
     value=5.0,
     step=1.0,
-    help="この数値以上の回転率になった銘柄を「過熱」として抽出します。"
+    help="直近5営業日のうち、この数値以上の回転率になった日がある銘柄を抽出します。"
 )
 
-if st.button("今すぐスキャンを実行", use_container_width=True):
+if st.button("今すぐスキャンを実行（直近5営業日）", use_container_width=True):
     stocks = groups[selected_scan_group]
     total_stocks = len(stocks)
     
@@ -168,7 +167,6 @@ if st.button("今すぐスキャンを実行", use_container_width=True):
         
         results = []
         alert_count = 0
-        now = datetime.datetime.now()
         
         for i, info in enumerate(stocks):
             ticker = info["ticker"]
@@ -179,38 +177,33 @@ if st.button("今すぐスキャンを実行", use_container_width=True):
             
             try:
                 stock = yf.Ticker(ticker)
-                history = stock.history(period="5d")
+                # 念のため過去10日分取得し、有効な直近5営業日分を抽出
+                history = stock.history(period="10d")
                 
                 if history.empty:
                     continue 
-                    
-                latest_date = history.index[-1].date()
-                
-                if now.hour < 16 and latest_date == now.date() and len(history) >= 2:
-                    target_index = -2
-                else:
-                    target_index = -1
-                    
-                target_data = history.iloc[target_index]
-                daily_volume = target_data['Volume']
-                target_date_str = target_data.name.strftime('%Y/%m/%d')
                 
                 shares_outstanding = stock.info.get('sharesOutstanding')
                 
                 if shares_outstanding is None or shares_outstanding <= 0:
                     continue 
                 
-                turnover_rate = (daily_volume / shares_outstanding) * 100
+                # 直近最大5営業日のデータを判定
+                recent_history = history.tail(5)
                 
-                if turnover_rate >= threshold_percent:
-                    alert_count += 1
-                    status = f"🚨 過熱 ({target_date_str})"
+                for idx, row in recent_history.iterrows():
+                    daily_volume = row['Volume']
+                    date_str = idx.strftime('%Y/%m/%d')
+                    turnover_rate = (daily_volume / shares_outstanding) * 100
                     
-                    results.append({
-                        "銘柄名": name,
-                        "回転率 (%)": round(turnover_rate, 2),
-                        "状態": status
-                    })
+                    if turnover_rate >= threshold_percent:
+                        alert_count += 1
+                        results.append({
+                            "日付": date_str,
+                            "銘柄名": name,
+                            "コード": ticker,
+                            "回転率 (%)": round(turnover_rate, 2),
+                        })
                 
             except Exception:
                 pass 
@@ -220,7 +213,10 @@ if st.button("今すぐスキャンを実行", use_container_width=True):
         status_text.text("すべてのスキャンが完了しました！")
         
         if results:
-            st.success(f"スキャン完了！ {alert_count}件の過熱銘柄が発見されました。")
-            st.table(pd.DataFrame(results))
+            st.success(f"スキャン完了！ 直近5営業日の中で計 {alert_count} 件の過熱（閾値超え）が発見されました。")
+            df_results = pd.DataFrame(results)
+            # 日付の新しい順（降順）にソートして表示
+            df_results = df_results.sort_values("日付", ascending=False)
+            st.dataframe(df_results, use_container_width=True, hide_index=True)
         else:
-            st.info(f"スキャン完了！ 今回、閾値（{threshold_percent}%）を超えた銘柄はありませんでした。")
+            st.info(f"スキャン完了！ 直近5営業日の中で閾値（{threshold_percent}%）を超えた銘柄はありませんでした。")
