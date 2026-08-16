@@ -35,7 +35,6 @@ def load_groups():
         except Exception:
             pass
     
-    # 初回起動時（ファイルが存在しない場合）は初期グループを作成して保存
     initial_groups = {"基本グループ": load_default_stocks()}
     save_groups(initial_groups)
     return initial_groups
@@ -53,7 +52,7 @@ st.write("銘柄をグループ単位で管理し、PC・スマホ間で同期�
 groups = load_groups()
 
 # ★ グループ＆銘柄の管理セクション
-with st.expander("⚙️ グループの作成・名前変更・銘柄追加", expanded=False):
+with st.expander("⚙️ グループの作成・名前変更・銘柄管理", expanded=False):
     
     # 1. 新規グループの作成
     col_g1, col_g2 = st.columns([3, 1])
@@ -92,9 +91,37 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄追加", e
                     st.success(f"「{active_group}」を「{rename_group_input}」に変更・保存しました！")
                     st.rerun()
 
-    st.markdown(f"**現在の「{active_group}」の登録数:** {len(groups[active_group])} 銘柄")
+    st.markdown(f"**現在の「{active_group}」の登録一覧 (計 {len(groups[active_group])} 銘柄)**")
+    
+    # ★ 各銘柄の右側に個別削除ボタンを配置するリスト表示
     if groups[active_group]:
-        st.dataframe(pd.DataFrame(groups[active_group]), use_container_width=True)
+        # ヘッダー表示
+        col_h1, col_h2, col_h3 = st.columns([2, 4, 1])
+        with col_h1:
+            st.caption("銘柄コード")
+        with col_h2:
+            st.caption("銘柄名")
+        with col_h3:
+            st.caption("操作")
+
+        # 銘柄ごとの行表示と個別削除ボタン
+        for idx, item in enumerate(groups[active_group]):
+            c1, c2, c3 = st.columns([2, 4, 1])
+            with c1:
+                st.write(f"`{item['ticker']}`")
+            with c2:
+                st.write(item['name'])
+            with c3:
+                # 銘柄ごとの個別削除ボタン
+                if st.button("削除", key=f"del_{active_group}_{idx}_{item['ticker']}"):
+                    deleted_name = groups[active_group].pop(idx)['name']
+                    save_groups(groups)
+                    st.success(f"「{deleted_name}」を削除しました！")
+                    st.rerun()
+    else:
+        st.info("このグループには銘柄が登録されていません。")
+
+    st.divider()
 
     # 4. 銘柄の一括追加（テキストエリアでコピペ対応）
     st.markdown("**📥 テキストエリアからコピペで一括追加**")
