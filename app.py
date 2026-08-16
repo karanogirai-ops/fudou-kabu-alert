@@ -74,7 +74,7 @@ def get_shares_outstanding(ticker):
     return None
 
 # --- 4. 画面UIと処理 ---
-st.title("🚀 株式回転率チェッカー（17seg業種別対応）")
+st.title("🚀 発行済総株数 回転率チェッカー")
 
 csv_df = load_csv_master()
 groups = load_groups()
