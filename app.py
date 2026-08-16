@@ -47,6 +47,18 @@ def save_groups(groups):
 # --- 3. 画面UIと処理 ---
 st.title("🚀 株式回転率チェッカー")
 
+# ★ スマホでもカラムの縦落ちを防止して1行横並びを強制するCSS設定
+st.markdown("""
+<style>
+/* カラムがスマホ画面で縦積みに折り返されるのを防止 */
+div[data-testid="stHorizontalBlock"] {
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 0.5rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # 最新のグループデータをサーバーファイルからロード
 groups = load_groups()
 
@@ -84,7 +96,7 @@ with st.expander("⚙️ グループの作成・名前変更・銘柄管理", e
 
     st.markdown(f"**現在の「{active_group}」の登録一覧 (計 {len(groups[active_group])} 銘柄)**")
     
-    # ★ 横並び・高さを揃えたモノクロ削除ボタン配置
+    # ★ 完全1行固定・モノクロ「✕」ボタン配置
     if groups[active_group]:
         for idx, item in enumerate(groups[active_group]):
             c1, c2 = st.columns([8, 2], vertical_alignment="center")
