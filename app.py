@@ -45,8 +45,7 @@ def save_groups(groups):
         json.dump(groups, f, ensure_ascii=False, indent=2)
 
 # --- 3. 画面UIと処理 ---
-st.title("🚀 株式回転率チェッカー（全端末同期版）")
-st.write("銘柄をグループ単位で管理し、PC・スマホ間で同期して安全にスキャンします。")
+st.title("🚀 株式回転率チェッカー")
 
 # 最新のグループデータをサーバーファイルからロード
 groups = load_groups()
