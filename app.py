@@ -1,7 +1,7 @@
 import time
 import pandas as pd
 import requests
-import Streamlit as st
+import streamlit as st
 import yfinance as yf
 
 CHUNK_SIZE = 200
