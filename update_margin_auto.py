@@ -8,31 +8,24 @@ import pypdf
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
 
-JPX_MARGIN_PAGE = "https://www.jpx.co.jp/markets/statistics-equities/margin/06.html"
+# ★ 正しいJPX「銘柄別信用取引週末残高」のページURL
+JPX_MARGIN_PAGE = "https://www.jpx.co.jp/markets/statistics-equities/margin/05.html"
 
 def get_latest_pdf_url():
-    """JPX公式ページから最新の『銘柄別信用取引週末残高』PDFリンクを自動検出"""
+    """05.html ページから最新のPDFリンクを取得"""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     res = requests.get(JPX_MARGIN_PAGE, headers=headers, timeout=15)
     res.raise_for_status()
     
     soup = BeautifulSoup(res.text, "html.parser")
     
-    # 1. リンクテキストに「銘柄別」または「週末残高」が含まれるPDFを探す
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        text = a.text.strip()
-        if href.lower().endswith(".pdf"):
-            if "銘柄別" in text or "週末残高" in text or "syumatsu" in href.lower():
-                return href if href.startswith("http") else "https://www.jpx.co.jp" + href
-
-    # 2. 条件を緩めてページ内の最初のPDFリンクを取得（フォールバック）
+    # ページ内の .pdf リンクを探す
     for a in soup.find_all("a", href=True):
         href = a["href"]
         if href.lower().endswith(".pdf"):
             return href if href.startswith("http") else "https://www.jpx.co.jp" + href
             
-    raise Exception("JPXのページから最新のPDFリンクが見つかりませんでした。")
+    raise Exception("JPXのページからPDFリンクが見つかりませんでした。")
 
 def parse_margin_pdf(pdf_path):
     """PDFを全ページ読み込み、銘柄コードと信用買残・売残を抽出"""
