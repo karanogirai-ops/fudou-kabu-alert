@@ -290,24 +290,24 @@ if st.button("🚀 今すぐスキャンを実行する", use_container_width=Tr
                         date_str = idx.strftime('%Y/%m/%d')
                         
                         turnover_rate = (daily_volume / effective_shares) * 100
-                        market_cap_oku = int(round((close_price * shares_outstanding) / 100_000_000))
-                        
-                        # 買残消化日数（日）
+                        trading_value_man = int(round((close_price * daily_volume) / 10_000))  # 取引総額（万円）
                         digest_days = round(margin_buy / daily_volume, 1) if daily_volume > 0 else 0
                         
                         if turnover_rate >= threshold_percent:
                             alert_count += 1
+                            # ご指定順のカラム構成
                             res_item = {
                                 "日付": date_str,
                                 "コード": ticker,
                                 "銘柄名": name,
                                 "回転率 (%)": round(turnover_rate, 2),
-                                "信用倍率 (倍)": round(margin_ratio, 2) if margin_ratio != 999.0 else "売りゼロ",
-                                "買残消化日数 (日)": digest_days,
-                                "信用買残 (株)": f"{int(margin_buy):,}" if margin_buy > 0 else "-",
-                                "信用売残 (株)": f"{int(margin_sell):,}" if margin_sell > 0 else "-",
-                                "時価総額（億円）": f"{market_cap_oku:,}",
-                                "株価（円）": round(close_price, 1)
+                                "取引総額（万円）": f"{trading_value_man:,}",
+                                "出来高（株）": f"{int(daily_volume):,}",
+                                "株価（円）": round(close_price, 1),
+                                "信用買残（株）": f"{int(margin_buy):,}" if margin_buy > 0 else "-",
+                                "信用売残（株）": f"{int(margin_sell):,}" if margin_sell > 0 else "-",
+                                "信用倍率（倍）": round(margin_ratio, 2) if margin_ratio != 999.0 else "売りゼロ",
+                                "買残消化日数（日）": digest_days
                             }
                             results.append(res_item)
             except Exception:
