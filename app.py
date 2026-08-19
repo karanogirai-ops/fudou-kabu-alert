@@ -25,25 +25,41 @@ def get_supabase_config():
     }
     return rest_url, headers
 
-# --- 2. Supabaseからのデータ読み書き ---
+# --- 2. Supabaseからの全件データ取得（ページネーション対応） ---
 @st.cache_data(ttl=3600)  # 1時間キャッシュ
 def load_supabase_master():
-    """Supabaseの stocks_master テーブルから全件取得（4,000件以上対応）"""
+    """1,000件の制限を回避し、ループ処理で全件（4,000件超）取得"""
+    all_data = []
+    page_size = 1000
+    offset = 0
+    
     try:
         rest_url, headers = get_supabase_config()
-        # Supabaseの1,000件制限を解除するためにRangeヘッダーを指定
-        headers_read = headers.copy()
-        headers_read["Range"] = "0-9999"
         
-        endpoint = f"{rest_url}/stocks_master?select=*"
-        res = requests.get(endpoint, headers=headers_read, timeout=10)
-        
-        if res.status_code in [200, 206]:
-            data = res.json()
-            if data:
-                return pd.DataFrame(data)
-        else:
-            st.error(f"取得失敗（ステータスコード: {res.status_code}）: {res.text}")
+        while True:
+            headers_read = headers.copy()
+            # 1,000件ずつ範囲を指定して分割取得
+            headers_read["Range-Unit"] = "items"
+            headers_read["Range"] = f"{offset}-{offset + page_size - 1}"
+            
+            endpoint = f"{rest_url}/stocks_master?select=*"
+            res = requests.get(endpoint, headers=headers_read, timeout=10)
+            
+            if res.status_code in [200, 206]:
+                data = res.json()
+                if not data:
+                    break
+                all_data.extend(data)
+                
+                # 取得データが1,000件未満なら全件取得完了
+                if len(data) < page_size:
+                    break
+                offset += page_size
+            else:
+                break
+                
+        if all_data:
+            return pd.DataFrame(all_data)
     except Exception as e:
         st.error(f"Supabaseマスタ取得エラー: {e}")
     return pd.DataFrame()
@@ -123,7 +139,7 @@ search_mode = st.radio(
 target_stocks = []
 
 if not master_df.empty:
-    # 表記揺れ対応
+    # 表記揺れ吸収
     col_ticker = "Ticker" if "Ticker" in master_df.columns else "ticker"
     col_name = "Name" if "Name" in master_df.columns else "name"
     col_categoy = "Categoy" if "Categoy" in master_df.columns else "categoy"
