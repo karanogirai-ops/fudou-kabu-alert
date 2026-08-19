@@ -12,14 +12,24 @@ JPX_MARGIN_PAGE = "https://www.jpx.co.jp/markets/statistics-equities/margin/06.h
 
 def get_latest_pdf_url():
     """JPX公式ページから最新の『銘柄別信用取引週末残高』PDFリンクを自動検出"""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res = requests.get(JPX_MARGIN_PAGE, headers=headers, timeout=10)
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    res = requests.get(JPX_MARGIN_PAGE, headers=headers, timeout=15)
     res.raise_for_status()
     
     soup = BeautifulSoup(res.text, "html.parser")
+    
+    # 1. リンクテキストに「銘柄別」または「週末残高」が含まれるPDFを探す
     for a in soup.find_all("a", href=True):
-        if "syumatsu" in a["href"] and a["href"].endswith(".pdf"):
-            href = a["href"]
+        href = a["href"]
+        text = a.text.strip()
+        if href.lower().endswith(".pdf"):
+            if "銘柄別" in text or "週末残高" in text or "syumatsu" in href.lower():
+                return href if href.startswith("http") else "https://www.jpx.co.jp" + href
+
+    # 2. 条件を緩めてページ内の最初のPDFリンクを取得（フォールバック）
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.lower().endswith(".pdf"):
             return href if href.startswith("http") else "https://www.jpx.co.jp" + href
             
     raise Exception("JPXのページから最新のPDFリンクが見つかりませんでした。")
@@ -64,8 +74,7 @@ def parse_margin_pdf(pdf_path):
 def update_supabase(data):
     """Supabaseの stocks_master テーブルへ分割アップサート（上書き更新）"""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        st_err = "SUPABASE_URL または SUPABASE_KEY が設定されていません。"
-        print(st_err)
+        print("SUPABASE_URL または SUPABASE_KEY が設定されていません。")
         return
 
     endpoint = f"{SUPABASE_URL}/rest/v1/stocks_master"
