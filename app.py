@@ -28,16 +28,22 @@ def get_supabase_config():
 # --- 2. Supabaseからのデータ読み書き ---
 @st.cache_data(ttl=3600)  # 1時間キャッシュ
 def load_supabase_master():
-    """Supabaseの stocks_master テーブルから全件取得（クラウド管理）"""
+    """Supabaseの stocks_master テーブルから全件取得（4,000件以上対応）"""
     try:
         rest_url, headers = get_supabase_config()
-        endpoint = f"{rest_url}/stocks_master?select=*"
-        res = requests.get(endpoint, headers=headers, timeout=10)
+        # Supabaseの1,000件制限を解除するためにRangeヘッダーを指定
+        headers_read = headers.copy()
+        headers_read["Range"] = "0-9999"
         
-        if res.status_code == 200:
+        endpoint = f"{rest_url}/stocks_master?select=*"
+        res = requests.get(endpoint, headers=headers_read, timeout=10)
+        
+        if res.status_code in [200, 206]:
             data = res.json()
             if data:
                 return pd.DataFrame(data)
+        else:
+            st.error(f"取得失敗（ステータスコード: {res.status_code}）: {res.text}")
     except Exception as e:
         st.error(f"Supabaseマスタ取得エラー: {e}")
     return pd.DataFrame()
@@ -48,7 +54,7 @@ def load_groups():
         endpoint = f"{rest_url}/app_data?id=eq.stock_groups&select=data"
         res = requests.get(endpoint, headers=headers, timeout=10)
         
-        if res.status_code == 200:
+        if res.status_code in [200, 206]:
             data = res.json()
             if data and len(data) > 0 and "data" in data[0]:
                 return data[0]["data"]
@@ -89,7 +95,7 @@ master_df = load_supabase_master()
 groups = load_groups()
 
 if master_df.empty:
-    st.warning("⚠️ Supabaseの stocks_master テーブルからデータを取得できませんでした。")
+    st.warning("⚠️ Supabaseの stocks_master テーブルからデータを取得できませんでした。Supabase画面で「Disable RLS」が設定されているかご確認ください。")
 
 # ★ 1. スキャン計算基準の選択
 st.markdown("### 📊 1. 回転率の計算基準を選択")
@@ -117,7 +123,7 @@ search_mode = st.radio(
 target_stocks = []
 
 if not master_df.empty:
-    # カラム名の大文字小文字表記揺れ吸収
+    # 表記揺れ対応
     col_ticker = "Ticker" if "Ticker" in master_df.columns else "ticker"
     col_name = "Name" if "Name" in master_df.columns else "name"
     col_categoy = "Categoy" if "Categoy" in master_df.columns else "categoy"
