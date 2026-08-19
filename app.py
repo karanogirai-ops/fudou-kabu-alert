@@ -25,6 +25,23 @@ def get_supabase_config():
     }
     return rest_url, headers
 
+# --- 2. Supabaseからのデータ読み書き ---
+@st.cache_data(ttl=3600)  # 1時間キャッシュ
+def load_supabase_master():
+    """Supabaseの stocks_master テーブルから全件取得（クラウド管理）"""
+    try:
+        rest_url, headers = get_supabase_config()
+        endpoint = f"{rest_url}/stocks_master?select=*"
+        res = requests.get(endpoint, headers=headers, timeout=10)
+        
+        if res.status_code == 200:
+            data = res.json()
+            if data:
+                return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Supabaseマスタ取得エラー: {e}")
+    return pd.DataFrame()
+
 def load_groups():
     try:
         rest_url, headers = get_supabase_config()
@@ -36,7 +53,7 @@ def load_groups():
             if data and len(data) > 0 and "data" in data[0]:
                 return data[0]["data"]
     except Exception as e:
-        st.error(f"データ取得エラー: {e}")
+        st.error(f"グループ取得エラー: {e}")
     return {}
 
 def save_groups(groups):
@@ -48,18 +65,9 @@ def save_groups(groups):
         headers_upsert["Prefer"] = "resolution=merge-duplicates"
         requests.post(endpoint, json=payload, headers=headers_upsert, timeout=10)
     except Exception as e:
-        st.error(f"データ保存エラー: {e}")
+        st.error(f"グループ保存エラー: {e}")
 
-# --- 2. stocks.csv の読み込み ---
-@st.cache_data
-def load_csv_master():
-    try:
-        df = pd.read_csv("stocks.csv", encoding="utf-8")
-    except UnicodeDecodeError:
-        df = pd.read_csv("stocks.csv", encoding="cp932")
-    return df
-
-# --- 3. キャッシュ付き発行済株式数取得 ---
+# --- 3. 発行済株式数取得（キャッシュ機能付き） ---
 @st.cache_data(ttl=86400)
 def get_shares_outstanding(ticker):
     try:
@@ -74,68 +82,104 @@ def get_shares_outstanding(ticker):
     return None
 
 # --- 4. 画面UIと処理 ---
-st.title("🚀 発行済総株数 回転率チェッカー")
+st.title("🚀 株式回転率チェッカー（クラウドマスタ対応）")
 
-csv_df = load_csv_master()
+# データ読み込み
+master_df = load_supabase_master()
 groups = load_groups()
 
-# ★ 検索モード選択
-st.markdown("### 🎯 検索モードの選択")
+if master_df.empty:
+    st.warning("⚠️ Supabaseの stocks_master テーブルからデータを取得できませんでした。")
+
+# ★ 1. スキャン計算基準の選択
+st.markdown("### 📊 1. 回転率の計算基準を選択")
+calc_mode = st.radio(
+    "どちらの基準で回転率（%）を算出しますか？",
+    [
+        "📈 総株数ベース（通常: 出来高 ÷ 発行済株式数）",
+        "🎈 浮動株数ベース（精密: 出来高 ÷ [発行済株式数 × 浮動株比率]）"
+    ],
+    horizontal=False
+)
+
+is_float_mode = "浮動株数ベース" in calc_mode
+
+st.divider()
+
+# ★ 2. 検索対象グループの選択
+st.markdown("### 🎯 2. 検索対象を選択")
 search_mode = st.radio(
-    "スキャン方法を選んでください:",
-    ["🏢 17業種区分（17seg-Name）でスキャン", "🏷️ 市場区分（Categoy）でスキャン", "📁 カスタムグループ（Supabase保存）でスキャン"],
+    "対象銘柄の絞り込み方法:",
+    ["🏢 17業種区分（17seg-Name）", "🏷️ 市場区分（Categoy）", "📁 カスタムグループ"],
     horizontal=True
 )
 
 target_stocks = []
 
-if search_mode == "🏢 17業種区分（17seg-Name）でスキャン":
-    # "-"（ハイフン/未分類）を除外した17業種リストを作成
-    valid_17seg_df = csv_df[csv_df["17seg-Name"].astype(str).str.strip() != "-"]
-    unique_17seg = sorted([str(x) for x in valid_17seg_df["17seg-Name"].dropna().unique()])
-    
-    selected_17seg = st.selectbox("17業種（17seg-Name）を選択", unique_17seg)
-    filtered_df = csv_df[csv_df["17seg-Name"] == selected_17seg]
-    
-    st.info(f"選択中: **{selected_17seg}** （該当: **{len(filtered_df)}** 銘柄）")
-    
-    for _, row in filtered_df.iterrows():
-        target_stocks.append({
-            "ticker": str(row["Ticker"]),
-            "name": str(row["Name"])
-        })
+if not master_df.empty:
+    # カラム名の大文字小文字表記揺れ吸収
+    col_ticker = "Ticker" if "Ticker" in master_df.columns else "ticker"
+    col_name = "Name" if "Name" in master_df.columns else "name"
+    col_categoy = "Categoy" if "Categoy" in master_df.columns else "categoy"
+    col_17seg_name = "17seg-Name" if "17seg-Name" in master_df.columns else ("17seg_name" if "17seg_name" in master_df.columns else "17seg")
 
-elif search_mode == "🏷️ 市場区分（Categoy）でスキャン":
-    unique_categoy = sorted([str(x) for x in csv_df["Categoy"].dropna().unique()])
-    selected_categoy = st.selectbox("市場区分（Categoy）を選択", unique_categoy)
-    filtered_df = csv_df[csv_df["Categoy"] == selected_categoy]
-    
-    st.info(f"選択中: **{selected_categoy}** （該当: **{len(filtered_df)}** 銘柄）")
-    
-    for _, row in filtered_df.iterrows():
-        target_stocks.append({
-            "ticker": str(row["Ticker"]),
-            "name": str(row["Name"])
-        })
+    if search_mode == "🏢 17業種区分（17seg-Name）":
+        valid_df = master_df[master_df[col_17seg_name].astype(str).str.strip() != "-"]
+        unique_categories = sorted([str(x) for x in valid_df[col_17seg_name].dropna().unique()])
+        
+        selected_cat = st.selectbox("17業種を選択", unique_categories)
+        filtered_df = master_df[master_df[col_17seg_name] == selected_cat]
+        st.info(f"選択中: **{selected_cat}** （該当: **{len(filtered_df)}** 銘柄）")
+        
+        for _, row in filtered_df.iterrows():
+            target_stocks.append({
+                "ticker": str(row[col_ticker]),
+                "name": str(row[col_name]),
+                "float_ratio": float(row.get("float_ratio", 1.0)) if pd.notnull(row.get("float_ratio")) else 1.0
+            })
 
-else:
-    # カスタムグループ検索
-    group_names = list(groups.keys()) if groups else []
-    if not group_names:
-        st.warning("カスタムグループが登録されていません。下の設定画面から作成してください。")
+    elif search_mode == "🏷️ 市場区分（Categoy）":
+        unique_categoy = sorted([str(x) for x in master_df[col_categoy].dropna().unique()])
+        
+        selected_cat = st.selectbox("市場区分を選択", unique_categoy)
+        filtered_df = master_df[master_df[col_categoy] == selected_cat]
+        st.info(f"選択中: **{selected_cat}** （該当: **{len(filtered_df)}** 銘柄）")
+        
+        for _, row in filtered_df.iterrows():
+            target_stocks.append({
+                "ticker": str(row[col_ticker]),
+                "name": str(row[col_name]),
+                "float_ratio": float(row.get("float_ratio", 1.0)) if pd.notnull(row.get("float_ratio")) else 1.0
+            })
+
     else:
-        selected_group_name = st.selectbox("グループを選択", group_names)
-        target_stocks = groups[selected_group_name]
-        st.info(f"選択中: **{selected_group_name}** （該当: **{len(target_stocks)}** 銘柄）")
+        # カスタムグループ
+        group_names = list(groups.keys()) if groups else []
+        if not group_names:
+            st.warning("カスタムグループが登録されていません。画面下部から作成してください。")
+        else:
+            selected_group_name = st.selectbox("グループを選択", group_names)
+            raw_target = groups[selected_group_name]
+            st.info(f"選択中: **{selected_group_name}** （該当: **{len(raw_target)}** 銘柄）")
+            
+            master_dict = dict(zip(master_df[col_ticker], master_df.get('float_ratio', 1.0)))
+            for item in raw_target:
+                t = item["ticker"]
+                fr = master_dict.get(t, 1.0)
+                target_stocks.append({
+                    "ticker": t,
+                    "name": item["name"],
+                    "float_ratio": float(fr) if pd.notnull(fr) and float(fr) > 0 else 1.0
+                })
 
 st.divider()
 
-# ★ スキャン設定
+# ★ 3. スキャン実行設定
 threshold_percent = st.number_input(
-    "アラートを出す回転率の閾値（%）",
+    f"アラートを出す回転率の閾値（%） [{'浮動株ベース' if is_float_mode else '総株数ベース'}]",
     min_value=1.0,
-    max_value=200.0,
-    value=5.0,
+    max_value=500.0,
+    value=5.0 if not is_float_mode else 10.0,
     step=1.0
 )
 
@@ -150,6 +194,7 @@ if st.button("🚀 今すぐスキャンを実行する", use_container_width=Tr
         
         ticker_list = [s["ticker"] for s in target_stocks]
         name_map = {s["ticker"]: s["name"] for s in target_stocks}
+        float_map = {s["ticker"]: s.get("float_ratio", 1.0) for s in target_stocks}
         
         results = []
         alert_count = 0
@@ -167,6 +212,9 @@ if st.button("🚀 今すぐスキャンを実行する", use_container_width=Tr
                 
                 for ticker in chunk_tickers:
                     name = name_map[ticker]
+                    float_ratio = float_map.get(ticker, 1.0)
+                    if float_ratio <= 0:
+                        float_ratio = 1.0
                     
                     if len(chunk_tickers) == 1:
                         stock_hist = downloaded
@@ -186,25 +234,33 @@ if st.button("🚀 今すぐスキャンを実行する", use_container_width=Tr
                     if not shares_outstanding or shares_outstanding <= 0:
                         continue
                     
+                    # 計算母数の切り替え
+                    if is_float_mode:
+                        effective_shares = shares_outstanding * float_ratio
+                    else:
+                        effective_shares = shares_outstanding
+                    
                     for idx, row in recent_history.iterrows():
                         daily_volume = float(row['Volume'])
                         close_price = float(row['Close'])
                         date_str = idx.strftime('%Y/%m/%d')
-                        turnover_rate = (daily_volume / shares_outstanding) * 100
                         
+                        turnover_rate = (daily_volume / effective_shares) * 100
                         market_cap_oku = int(round((close_price * shares_outstanding) / 100_000_000))
                         
                         if turnover_rate >= threshold_percent:
                             alert_count += 1
-                            results.append({
+                            res_item = {
                                 "日付": date_str,
                                 "コード": ticker,
                                 "銘柄名": name,
                                 "回転率 (%)": round(turnover_rate, 2),
+                                "計算基準": "浮動株" if is_float_mode else "総株数",
+                                "浮動株比率": f"{int(float_ratio * 100)}%" if is_float_mode else "-",
                                 "時価総額（億円）": f"{market_cap_oku:,}",
-                                "発行済株式数": f"{int(shares_outstanding):,}",
                                 "株価（円）": round(close_price, 1)
-                            })
+                            }
+                            results.append(res_item)
             except Exception:
                 pass
             
@@ -223,7 +279,7 @@ if st.button("🚀 今すぐスキャンを実行する", use_container_width=Tr
 
 st.divider()
 
-# ★ カスタムグループ管理（折りたたみ）
+# ★ 4. カスタムグループ管理（折りたたみ）
 with st.expander("⚙️ カスタムグループの作成・編集（Supabase保存）", expanded=False):
     new_group_name = st.text_input("新しいグループを作成", key="new_group_input")
     if st.button("グループを作成", use_container_width=True):
