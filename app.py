@@ -26,9 +26,9 @@ def get_supabase_config():
     return rest_url, headers
 
 # --- 2. Supabaseからの全件データ取得（ページネーション対応） ---
-@st.cache_data(ttl=3600)  # 1時間キャッシュ
+@st.cache_data(ttl=3600)
 def load_supabase_master():
-    """1,000件の制限を回避し、ループ処理で全件（4,000件超）取得"""
+    """1,000件制限を回避して全件取得"""
     all_data = []
     page_size = 1000
     offset = 0
@@ -38,7 +38,6 @@ def load_supabase_master():
         
         while True:
             headers_read = headers.copy()
-            # 1,000件ずつ範囲を指定して分割取得
             headers_read["Range-Unit"] = "items"
             headers_read["Range"] = f"{offset}-{offset + page_size - 1}"
             
@@ -50,8 +49,6 @@ def load_supabase_master():
                 if not data:
                     break
                 all_data.extend(data)
-                
-                # 取得データが1,000件未満なら全件取得完了
                 if len(data) < page_size:
                     break
                 offset += page_size
@@ -104,19 +101,19 @@ def get_shares_outstanding(ticker):
     return None
 
 # --- 4. 画面UIと処理 ---
-st.title("🚀 株式回転率チェッカー（クラウドマスタ対応）")
+st.title("🚀 株式回転率 & 需給チェッカー（クラウドマスタ対応）")
 
 # データ読み込み
 master_df = load_supabase_master()
 groups = load_groups()
 
 if master_df.empty:
-    st.warning("⚠️ Supabaseの stocks_master テーブルからデータを取得できませんでした。Supabase画面で「Disable RLS」が設定されているかご確認ください。")
+    st.warning("⚠️ Supabaseの stocks_master テーブルからデータを取得できませんでした。")
 
 # ★ 1. スキャン計算基準の選択
 st.markdown("### 📊 1. 回転率の計算基準を選択")
 calc_mode = st.radio(
-    "どちらの基準で回転率（%）を算出しますか？",
+    "回転率（%）の計算基準:",
     [
         "📈 総株数ベース（通常: 出来高 ÷ 発行済株式数）",
         "🎈 浮動株数ベース（精密: 出来高 ÷ [発行済株式数 × 浮動株比率]）"
@@ -139,7 +136,6 @@ search_mode = st.radio(
 target_stocks = []
 
 if not master_df.empty:
-    # 表記揺れ吸収
     col_ticker = "Ticker" if "Ticker" in master_df.columns else "ticker"
     col_name = "Name" if "Name" in master_df.columns else "name"
     col_categoy = "Categoy" if "Categoy" in master_df.columns else "categoy"
@@ -157,7 +153,9 @@ if not master_df.empty:
             target_stocks.append({
                 "ticker": str(row[col_ticker]),
                 "name": str(row[col_name]),
-                "float_ratio": float(row.get("float_ratio", 1.0)) if pd.notnull(row.get("float_ratio")) else 1.0
+                "float_ratio": float(row.get("float_ratio", 1.0)) if pd.notnull(row.get("float_ratio")) else 1.0,
+                "margin_buy": float(row.get("margin_buy", 0)) if pd.notnull(row.get("margin_buy")) else 0,
+                "margin_sell": float(row.get("margin_sell", 0)) if pd.notnull(row.get("margin_sell")) else 0
             })
 
     elif search_mode == "🏷️ 市場区分（Categoy）":
@@ -171,11 +169,12 @@ if not master_df.empty:
             target_stocks.append({
                 "ticker": str(row[col_ticker]),
                 "name": str(row[col_name]),
-                "float_ratio": float(row.get("float_ratio", 1.0)) if pd.notnull(row.get("float_ratio")) else 1.0
+                "float_ratio": float(row.get("float_ratio", 1.0)) if pd.notnull(row.get("float_ratio")) else 1.0,
+                "margin_buy": float(row.get("margin_buy", 0)) if pd.notnull(row.get("margin_buy")) else 0,
+                "margin_sell": float(row.get("margin_sell", 0)) if pd.notnull(row.get("margin_sell")) else 0
             })
 
     else:
-        # カスタムグループ
         group_names = list(groups.keys()) if groups else []
         if not group_names:
             st.warning("カスタムグループが登録されていません。画面下部から作成してください。")
@@ -184,26 +183,46 @@ if not master_df.empty:
             raw_target = groups[selected_group_name]
             st.info(f"選択中: **{selected_group_name}** （該当: **{len(raw_target)}** 銘柄）")
             
-            master_dict = dict(zip(master_df[col_ticker], master_df.get('float_ratio', 1.0)))
+            master_dict = {row[col_ticker]: row for _, row in master_df.iterrows()}
             for item in raw_target:
                 t = item["ticker"]
-                fr = master_dict.get(t, 1.0)
+                row_data = master_dict.get(t, {})
+                fr = row_data.get('float_ratio', 1.0)
+                mb = row_data.get('margin_buy', 0)
+                ms = row_data.get('margin_sell', 0)
+                
                 target_stocks.append({
                     "ticker": t,
                     "name": item["name"],
-                    "float_ratio": float(fr) if pd.notnull(fr) and float(fr) > 0 else 1.0
+                    "float_ratio": float(fr) if pd.notnull(fr) and float(fr) > 0 else 1.0,
+                    "margin_buy": float(mb) if pd.notnull(mb) else 0,
+                    "margin_sell": float(ms) if pd.notnull(ms) else 0
                 })
 
 st.divider()
 
-# ★ 3. スキャン実行設定
-threshold_percent = st.number_input(
-    f"アラートを出す回転率の閾値（%） [{'浮動株ベース' if is_float_mode else '総株数ベース'}]",
-    min_value=1.0,
-    max_value=500.0,
-    value=5.0 if not is_float_mode else 10.0,
-    step=1.0
-)
+# ★ 3. 需給フィルター ＆ スキャン実行設定
+st.markdown("### ⚙️ 3. スキャン・需給フィルター条件")
+col1, col2 = st.columns(2)
+
+with col1:
+    threshold_percent = st.number_input(
+        f"回転率の閾値（%） [{'浮動株' if is_float_mode else '総株数'}]",
+        min_value=1.0,
+        max_value=500.0,
+        value=5.0 if not is_float_mode else 10.0,
+        step=1.0
+    )
+
+with col2:
+    max_ratio_filter = st.number_input(
+        "上限 信用倍率（倍） ※0でフィルター無効",
+        min_value=0.0,
+        max_value=100.0,
+        value=0.0,
+        step=0.5,
+        help="例: 2.0 に設定すると、信用倍率 2.0倍以下（売残多め・踏み上げ期待）の銘柄のみ抽出します。"
+    )
 
 if st.button("🚀 今すぐスキャンを実行する", use_container_width=True):
     total_stocks = len(target_stocks)
@@ -215,8 +234,7 @@ if st.button("🚀 今すぐスキャンを実行する", use_container_width=Tr
         progress_bar = st.progress(0)
         
         ticker_list = [s["ticker"] for s in target_stocks]
-        name_map = {s["ticker"]: s["name"] for s in target_stocks}
-        float_map = {s["ticker"]: s.get("float_ratio", 1.0) for s in target_stocks}
+        stock_dict = {s["ticker"]: s for s in target_stocks}
         
         results = []
         alert_count = 0
@@ -233,10 +251,18 @@ if st.button("🚀 今すぐスキャンを実行する", use_container_width=Tr
                 downloaded = yf.download(tickers=chunk_tickers, period="10d", group_by="ticker", progress=False)
                 
                 for ticker in chunk_tickers:
-                    name = name_map[ticker]
-                    float_ratio = float_map.get(ticker, 1.0)
-                    if float_ratio <= 0:
-                        float_ratio = 1.0
+                    s_info = stock_dict[ticker]
+                    name = s_info["name"]
+                    float_ratio = s_info["float_ratio"]
+                    margin_buy = s_info["margin_buy"]
+                    margin_sell = s_info["margin_sell"]
+                    
+                    # 信用倍率の計算
+                    margin_ratio = (margin_buy / margin_sell) if margin_sell > 0 else (999.0 if margin_buy > 0 else 0.0)
+                    
+                    # 信用倍率フィルター
+                    if max_ratio_filter > 0 and margin_ratio > max_ratio_filter:
+                        continue
                     
                     if len(chunk_tickers) == 1:
                         stock_hist = downloaded
@@ -256,11 +282,7 @@ if st.button("🚀 今すぐスキャンを実行する", use_container_width=Tr
                     if not shares_outstanding or shares_outstanding <= 0:
                         continue
                     
-                    # 計算母数の切り替え
-                    if is_float_mode:
-                        effective_shares = shares_outstanding * float_ratio
-                    else:
-                        effective_shares = shares_outstanding
+                    effective_shares = (shares_outstanding * float_ratio) if is_float_mode else shares_outstanding
                     
                     for idx, row in recent_history.iterrows():
                         daily_volume = float(row['Volume'])
@@ -270,6 +292,9 @@ if st.button("🚀 今すぐスキャンを実行する", use_container_width=Tr
                         turnover_rate = (daily_volume / effective_shares) * 100
                         market_cap_oku = int(round((close_price * shares_outstanding) / 100_000_000))
                         
+                        # 買残消化日数（日）
+                        digest_days = round(margin_buy / daily_volume, 1) if daily_volume > 0 else 0
+                        
                         if turnover_rate >= threshold_percent:
                             alert_count += 1
                             res_item = {
@@ -277,8 +302,10 @@ if st.button("🚀 今すぐスキャンを実行する", use_container_width=Tr
                                 "コード": ticker,
                                 "銘柄名": name,
                                 "回転率 (%)": round(turnover_rate, 2),
-                                "計算基準": "浮動株" if is_float_mode else "総株数",
-                                "浮動株比率": f"{int(float_ratio * 100)}%" if is_float_mode else "-",
+                                "信用倍率 (倍)": round(margin_ratio, 2) if margin_ratio != 999.0 else "売りゼロ",
+                                "買残消化日数 (日)": digest_days,
+                                "信用買残 (株)": f"{int(margin_buy):,}" if margin_buy > 0 else "-",
+                                "信用売残 (株)": f"{int(margin_sell):,}" if margin_sell > 0 else "-",
                                 "時価総額（億円）": f"{market_cap_oku:,}",
                                 "株価（円）": round(close_price, 1)
                             }
@@ -297,11 +324,11 @@ if st.button("🚀 今すぐスキャンを実行する", use_container_width=Tr
             df_results = df_results.sort_values("日付", ascending=False)
             st.dataframe(df_results, use_container_width=True, hide_index=True)
         else:
-            st.info(f"スキャン完了！ 閾値（{threshold_percent}%）を超えた銘柄はありませんでした。")
+            st.info(f"スキャン完了！ 条件に該当する銘柄はありませんでした。")
 
 st.divider()
 
-# ★ 4. カスタムグループ管理（折りたたみ）
+# ★ 4. カスタムグループ管理
 with st.expander("⚙️ カスタムグループの作成・編集（Supabase保存）", expanded=False):
     new_group_name = st.text_input("新しいグループを作成", key="new_group_input")
     if st.button("グループを作成", use_container_width=True):
