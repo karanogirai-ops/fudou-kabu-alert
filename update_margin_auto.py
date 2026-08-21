@@ -6,69 +6,45 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
 JQUANTS_REFRESH_TOKEN = os.environ.get("JQUANTS_REFRESH_TOKEN", "").strip()
 
 
-def test_jquants_auth():
-  print("--- [ステップ1: J-Quants 認証テスト] ---")
-  if not JQUANTS_REFRESH_TOKEN:
-    print(
-        "❌ FAIL: JQUANTS_REFRESH_TOKEN が GitHub Secrets"
-        " に登録されていません。"
-    )
-    return None
-
+def get_jquants_id_token():
+  """リフレッシュトークンから一時アクセス用IDトークンを取得"""
   url = f"https://api.jquants.com/v1/token/auth/refresh?refreshtoken={JQUANTS_REFRESH_TOKEN}"
   res = requests.post(url, timeout=15)
-  if res.status_code == 200:
-    id_token = res.json().get("idToken")
-    print(f"✅ SUCCESS: IDトークン取得成功 (先頭10文字: {id_token[:10]}...)")
-    return id_token
-  else:
-    print(
-        f"❌ FAIL: 認証エラー (ステータスコード: {res.status_code}) - {res.text}"
-    )
-    return None
+  res.raise_for_status()
+  return res.json().get("idToken")
 
 
-def test_jquants_fetch(id_token):
-  print("\n--- [ステップ2: J-Quants データ取得テスト] ---")
+def get_margin_data_from_jquants(id_token):
+  """J-Quants APIから最新の全銘柄信用取引残高を取得"""
   url = "https://api.jquants.com/v1/markets/weekly_margin_interest"
   headers = {"Authorization": f"Bearer {id_token}"}
 
   res = requests.get(url, headers=headers, timeout=30)
-  if res.status_code != 200:
-    print(
-        f"❌ FAIL: API取得エラー (ステータスコード: {res.status_code}) -"
-        f" {res.text}"
-    )
-    return None
+  res.raise_for_status()
 
   data = res.json().get("weekly_margin_interest", [])
-  print(f"✅ SUCCESS: データ取得成功 ({len(data)} 件のレコード)")
-
-  if data:
-    sample = data[0]
-    print(f"   サンプルデータ (1件目): {sample}")
+  print(f"   J-Quants取得件数: {len(data)} 件")
 
   margin_dict = {}
   for item in data:
     code_raw = str(item.get("Code", ""))
     code_4digit = code_raw[:4]
+
     buy_total = item.get("LongOutstandingBalance", 0) or 0
     sell_total = item.get("ShortOutstandingBalance", 0) or 0
-    margin_dict[code_4digit] = {"buy": int(buy_total), "sell": int(sell_total)}
 
-  # 博報堂（2433）のデータをピンポイント確認
-  if "2433" in margin_dict:
-    print(f"   🎯 博報堂(2433)のAPI取得値: {margin_dict['2433']}")
-  else:
-    print("   ⚠️ 博報堂(2433)がAPI取得データに含まれていません。")
+    margin_dict[code_4digit] = {
+        "buy": int(buy_total),
+        "sell": int(sell_total),
+    }
 
   return margin_dict
 
 
-def test_supabase_patch(margin_data):
-  print("\n--- [ステップ3: Supabase 更新テスト] ---")
+def update_supabase_all(margin_data):
+  """Supabaseの全銘柄に対してJ-Quantsデータを照合し一括更新"""
   if not SUPABASE_URL or not SUPABASE_KEY:
-    print("❌ FAIL: SUPABASE_URL または SUPABASE_KEY が不足しています。")
+    print("❌ エラー: SUPABASE設定が不足しています。")
     return
 
   headers = {
@@ -77,58 +53,62 @@ def test_supabase_patch(margin_data):
       "Content-Type": "application/json",
   }
 
+  print("1. Supabaseから全銘柄リストを取得中...")
   get_url = f"{SUPABASE_URL}/rest/v1/stocks_master?select=*"
   res = requests.get(get_url, headers=headers)
+
   if res.status_code not in [200, 206]:
-    print(
-        f"❌ FAIL: Supabase読み込みエラー ({res.status_code}) - {res.text}"
-    )
+    print(f"❌ 銘柄取得エラー: {res.status_code} - {res.text}")
     return
 
   rows = res.json()
-  print(f"✅ Supabase取得成功 ({len(rows)} 銘柄)")
+  print(f"   Supabase登録数: {len(rows)} 件")
 
-  # 博報堂（2433）単体でPATCH更新を直接テスト
-  hakuhodo_row = None
-  for r in rows:
-    raw_t = str(r.get("Ticker") or r.get("ticker") or "")
-    if "2433" in raw_t:
-      hakuhodo_row = r
-      break
+  print("2. J-Quantsデータを照合して一括UPDATE中...")
+  updated_count = 0
 
-  if not hakuhodo_row:
-    print("❌ FAIL: Supabase内に '2433' の銘柄が見つかりませんでした。")
-    return
+  for row in rows:
+    raw_ticker = str(row.get("Ticker") or row.get("ticker") or "")
+    code_4digit = raw_ticker.replace(".T", "").strip()
 
-  raw_ticker = str(hakuhodo_row.get("Ticker") or hakuhodo_row.get("ticker"))
-  print(f"   対象銘柄キー: {raw_ticker}")
+    if code_4digit in margin_data:
+      item = margin_data[code_4digit]
 
-  if "2433" in margin_data:
-    item = margin_data["2433"]
-    patch_url = (
-        f"{SUPABASE_URL}/rest/v1/stocks_master?Ticker=eq.{raw_ticker}"
-        if "Ticker" in hakuhodo_row
-        else f"{SUPABASE_URL}/rest/v1/stocks_master?ticker=eq.{raw_ticker}"
-    )
-    payload = {"margin_buy": item["buy"], "margin_sell": item["sell"]}
-
-    patch_res = requests.patch(patch_url, json=payload, headers=headers)
-    print(
-        f"   PATCH送信ステータス: {patch_res.status_code} (レスポンス:"
-        f" '{patch_res.text}')"
-    )
-    if patch_res.status_code in [200, 204]:
-      print(
-          f"✅ SUCCESS: 博報堂(2433)を更新しました！ (買残: {item['buy']},"
-          f" 売残: {item['sell']})"
+      patch_url = (
+          f"{SUPABASE_URL}/rest/v1/stocks_master?Ticker=eq.{raw_ticker}"
+          if "Ticker" in row
+          else f"{SUPABASE_URL}/rest/v1/stocks_master?ticker=eq.{raw_ticker}"
       )
-    else:
-      print("❌ FAIL: PATCH更新に失敗しました。")
+
+      payload = {
+          "margin_buy": item["buy"],
+          "margin_sell": item["sell"],
+      }
+
+      patch_res = requests.patch(patch_url, json=payload, headers=headers)
+      if patch_res.status_code in [200, 204]:
+        updated_count += 1
+
+  print(
+      f"🎉 成功！ 計 {updated_count}"
+      " 件の信用残高データを公式APIデータで完璧に上書き更新しました！"
+  )
 
 
 if __name__ == "__main__":
-  id_token = test_jquants_auth()
-  if id_token:
-    margin_data = test_jquants_fetch(id_token)
-    if margin_data:
-      test_supabase_patch(margin_data)
+  if not JQUANTS_REFRESH_TOKEN:
+    print("❌ エラー: JQUANTS_REFRESH_TOKEN が設定されていません！")
+  else:
+    try:
+      print("1. J-Quants APIの認証を実行中...")
+      id_token = get_jquants_id_token()
+
+      print("2. 公式APIから信用取引データを取得中...")
+      margin_data = get_margin_data_from_jquants(id_token)
+
+      if margin_data:
+        update_supabase_all(margin_data)
+      else:
+        print("⚠️ エラー: APIデータが空でした。")
+    except Exception as e:
+      print(f"❌ 処理失敗: {e}")
