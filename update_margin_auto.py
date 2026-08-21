@@ -50,23 +50,12 @@ def parse_margin_pdf(pdf_path):
                 sell_total = 0
                 buy_total = 0
                 
-                # JPX PDFの列順序:
-                # [0] 売り合計
-                # [1] 売り一般
-                # [2] 売り制度
-                # [3] 前週比売り
-                # [4] 買い一般
-                # [5] 買い制度
-                # [6] 買い合計
-                if len(clean_nums) >= 7:
+                # JPX PDFの数値配列（clean_nums）の正しい対応位置:
+                # clean_nums[0] = 売残合計
+                # clean_nums[-1] = 買残合計 (行の最後の数値)
+                if len(clean_nums) >= 2:
                     sell_total = clean_nums[0]
-                    buy_total = clean_nums[6]
-                elif len(clean_nums) >= 5:
-                    sell_total = clean_nums[0]
-                    buy_total = clean_nums[4]
-                elif len(clean_nums) >= 2:
-                    sell_total = clean_nums[0]
-                    buy_total = clean_nums[1]
+                    buy_total = clean_nums[-1]
                 else:
                     break
                 
