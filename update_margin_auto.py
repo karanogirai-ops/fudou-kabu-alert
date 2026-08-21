@@ -1,33 +1,90 @@
-import io
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
+import random
 import re
-import pdfplumber
+from bs4 import BeautifulSoup
 import requests
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
 
-JPX_MARGIN_PAGE = (
-    "https://www.jpx.co.jp/markets/statistics-equities/margin/05.html"
-)
+USER_AGENTS = [
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+]
 
 
-def get_latest_pdf_url():
-  headers = {"User-Agent": "Mozilla/5.0"}
-  res = requests.get(JPX_MARGIN_PAGE, headers=headers, timeout=15)
-  res.raise_for_status()
+def fetch_yahoo_clean_margin(row):
+  """Yahoo!ファイナンスのHTMLから純粋な株数（買残・売残）を取り出す"""
+  raw_ticker = str(row.get("Ticker") or row.get("ticker") or "")
+  code_4digit = raw_ticker.replace(".T", "").strip()
 
-  from bs4 import BeautifulSoup
+  if not code_4digit.isdigit() or len(code_4digit) != 4:
+    return None
 
-  soup = BeautifulSoup(res.text, "html.parser")
-  for a in soup.find_all("a", href=True):
-    href = a["href"]
-    if href.lower().endswith(".pdf"):
-      return (
-          href if href.startswith("http") else "https://www.jpx.co.jp" + href
-      )
+  url = f"https://finance.yahoo.co.jp/quote/{code_4digit}.T/margin"
+  headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-  raise Exception("JPXページからPDFが見つかりませんでした。")
+  try:
+    res = requests.get(url, headers=headers, timeout=8)
+    if res.status_code == 200:
+      soup = BeautifulSoup(res.text, "html.parser")
+
+      buy_val = 0
+      sell_val = 0
+
+      # HTML内の「信用買残」「信用売残」のテキストの隣にある数字を検索
+      for span in soup.find_all(["span", "td", "li"]):
+        text = span.get_text().strip()
+
+        # 買残の取得
+        if "買残" in text and buy_val == 0:
+          parent = span.find_parent(["tr", "li", "div", "dl"])
+          if parent:
+            # カンマ付き数字をすべて抽出
+            nums = re.findall(r"\b\d{1,3}(?:,\d{3})+\b|\b\d+\b", parent.text)
+            clean_nums = [
+                int(n.replace(",", "")) for n in nums if n.replace(",", "").isdigit()
+            ]
+            # 100以上（株数として自然な数値）を採用
+            valid = [n for n in clean_nums if n >= 100]
+            if valid:
+              buy_val = valid[0]
+
+        # 売残の取得
+        if "売残" in text and sell_val == 0:
+          parent = span.find_parent(["tr", "li", "div", "dl"])
+          if parent:
+            nums = re.findall(r"\b\d{1,3}(?:,\d{3})+\b|\b\d+\b", parent.text)
+            clean_nums = [
+                int(n.replace(",", "")) for n in nums if n.replace(",", "").isdigit()
+            ]
+            valid = [n for n in clean_nums if n >= 100]
+            if valid:
+              sell_val = valid[0]
+
+      if buy_val > 0 or sell_val > 0:
+        updated_row = dict(row)
+        updated_row["margin_buy"] = buy_val
+        updated_row["margin_sell"] = sell_val
+
+        if code_4digit == "2433":
+          print(
+              f"   🎯 【確認】博報堂(2433) 抽出値: 買残={buy_val},"
+              f" 売残={sell_val}"
+          )
+
+        return updated_row
+  except Exception:
+    pass
+
+  return None
 
 
 def fetch_all_supabase_rows(headers):
@@ -55,64 +112,7 @@ def fetch_all_supabase_rows(headers):
   return all_rows
 
 
-def parse_pdf_table_strict(pdf_bytes):
-  """表構造（セル位置）を直接指定して制度信用（特定）の数値を完全に正確に抽出"""
-  margin_map = {}
-
-  with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-    for page in pdf.pages:
-      # 明示的な表抽出設定（縦横のテキスト配置からグリッドを生成）
-      tables = page.extract_tables({
-          "vertical_strategy": "text",
-          "horizontal_strategy": "text",
-          "snap_tolerance": 3,
-      })
-
-      for table in tables:
-        for row in table:
-          if not row:
-            continue
-
-          # セル内の無駄な改行や空白を除去
-          clean_row = [
-              str(cell).strip().replace("\n", "").replace(",", "")
-              for cell in row
-              if cell is not None
-          ]
-
-          # 行内に5桁の銘柄コードを探す
-          for idx, cell in enumerate(clean_row):
-            if re.match(r"^\d{5}$", cell):
-              code_4digit = cell[:4]
-
-              # コードより右側にある「純粋な数字セル」のみを取り出す
-              nums = []
-              for val in clean_row[idx + 1 :]:
-                # 前週比や▲記号、ハイフン等を除外した数字のみ
-                clean_num = re.sub(r"[^\d]", "", val)
-                if clean_num.isdigit() and len(clean_num) > 0:
-                  nums.append(int(clean_num))
-
-              # JPXのPDF列構成（数字のみの配列）：
-              # [0] 売り残合計
-              # [1] 売り残（一般）
-              # [2] 売り残（制度＝特定）★
-              # [3] 買い残（一般）
-              # [4] 買い残（制度＝特定）★
-              if len(nums) >= 5:
-                sell_system = nums[2]
-                buy_system = nums[4]
-
-                margin_map[code_4digit] = {
-                    "sell": sell_system,
-                    "buy": buy_system,
-                }
-              break
-
-  return margin_map
-
-
-def update_supabase_system_margin():
+def update_supabase_force():
   if not SUPABASE_URL or not SUPABASE_KEY:
     print("❌ エラー: SUPABASE設定が不足しています。")
     return
@@ -129,31 +129,29 @@ def update_supabase_system_margin():
       "apikey": SUPABASE_KEY,
       "Authorization": f"Bearer {SUPABASE_KEY}",
   })
-  print(f"   Supabase登録数: {len(rows)} 件")
+  print(f"   対象銘柄数: {len(rows)} 件")
 
-  print("2. JPXから最新PDFを取得中...")
-  pdf_url = get_latest_pdf_url()
-  pdf_res = requests.get(
-      pdf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30
-  )
-
-  print("3. 表構造（Grid）から制度信用（特定）の数値を抽出中...")
-  margin_map = parse_pdf_table_strict(pdf_res.content)
-  print(f"   解析完了: {len(margin_map)} 銘柄分を抽出")
-
-  print("4. Supabaseへ正常数値を上書き更新中...")
+  print("2. Yahoo!ファイナンスから1株単位の正しい数値を精密抽出中...")
   payload_list = []
-  for row in rows:
-    raw_ticker = str(row.get("Ticker") or row.get("ticker") or "")
-    code_4digit = raw_ticker.replace(".T", "").strip()
 
-    if code_4digit in margin_map:
-      data = margin_map[code_4digit]
-      updated_row = dict(row)
-      updated_row["margin_buy"] = data["buy"]
-      updated_row["margin_sell"] = data["sell"]
-      payload_list.append(updated_row)
+  # 並列数を少し落として（4スレッド）超確実に取得
+  with ThreadPoolExecutor(max_workers=4) as executor:
+    futures = [executor.submit(fetch_yahoo_clean_margin, row) for row in rows]
+    completed_count = 0
 
+    for future in as_completed(futures):
+      completed_count += 1
+      result = future.result()
+      if result:
+        payload_list.append(result)
+
+      if completed_count % 500 == 0 or completed_count == len(rows):
+        print(
+            f"   進捗: {completed_count} / {len(rows)} 件完了"
+            f" (抽出成功: {len(payload_list)} 件)"
+        )
+
+  print("3. Supabaseへ正常な数値（1株単位）で上書き書き込み中...")
   chunk_size = 200
   success_count = 0
   endpoint = f"{SUPABASE_URL}/rest/v1/stocks_master"
@@ -165,9 +163,9 @@ def update_supabase_system_margin():
       success_count += len(chunk)
 
   print(
-      f"🎉 完了！ 計 {success_count} 件の制度信用データを正確に更新しました！"
+      f"🎉 完了！ 計 {success_count} 件のデータを1株単位の正常な値で上書き更新しました！"
   )
 
 
 if __name__ == "__main__":
-  update_supabase_system_margin()
+  update_supabase_force()
