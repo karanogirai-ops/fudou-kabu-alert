@@ -24,7 +24,7 @@ def get_latest_pdf_url():
 
 def parse_margin_pdf(pdf_path):
     reader = pypdf.PdfReader(pdf_path)
-    extracted_data = []
+    extracted_dict = {}
     
     full_text = ""
     for page in reader.pages:
@@ -38,7 +38,7 @@ def parse_margin_pdf(pdf_path):
         parts = line.split()
         for idx, part in enumerate(parts):
             if re.match(r'^\d{5}$', part):
-                code_raw = part[:4] + ".T"
+                code_4digit = part[:4]
                 
                 after_parts = parts[idx + 1:]
                 clean_nums = []
@@ -59,40 +59,67 @@ def parse_margin_pdf(pdf_path):
                 else:
                     break
                 
-                extracted_data.append({
-                    "Ticker": code_raw,
-                    "ticker": code_raw,
-                    "margin_sell": sell_margin,
-                    "margin_buy": buy_margin
-                })
+                # 4桁コードをキーとして保持
+                extracted_dict[code_4digit] = {
+                    "sell": sell_margin,
+                    "buy": buy_margin
+                }
                 break
                 
-    return extracted_data
+    return extracted_dict
 
-def update_supabase(data):
+def update_supabase_directly(pdf_data):
+    """既存のstocks_masterの全行を取得し、Tickerに合わせてPATCH（個別に確実更新）"""
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("❌ エラー: SUPABASE_URL または SUPABASE_KEY が設定されていません！")
         return
 
-    # ★ on_conflict=Ticker をURLに明示して確実に上書きさせる
-    endpoint = f"{SUPABASE_URL}/rest/v1/stocks_master?on_conflict=Ticker"
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates"
+        "Content-Type": "application/json"
     }
 
-    chunk_size = 200
-    success_count = 0
-    for i in range(0, len(data), chunk_size):
-        chunk = data[i:i + chunk_size]
-        res = requests.post(endpoint, json=chunk, headers=headers, timeout=15)
-        if res.status_code in [200, 201]:
-            success_count += len(chunk)
-            print(f"✅ 送信成功: {success_count} / {len(data)} 件完了")
-        else:
-            print(f"❌ Supabase送信エラー ({res.status_code}): {res.text}")
+    # 1. 既存の全銘柄の Ticker / ticker を取得
+    print("1. Supabaseから既存の銘柄リストを取得中...")
+    get_url = f"{SUPABASE_URL}/rest/v1/stocks_master?select=*"
+    res = requests.get(get_url, headers=headers)
+    
+    if res.status_code not in [200, 206]:
+        print(f"❌ 銘柄取得エラー: {res.status_code} - {res.text}")
+        return
+
+    rows = res.json()
+    print(f"   Supabase登録銘柄数: {len(rows)} 件")
+
+    # 2. 1行ずつマッチングして更新（100件ずつ並列処理）
+    print("2. 信用データを照合して個別UPDATE（確実上書き）中...")
+    
+    updated_count = 0
+    for row in rows:
+        # Tickerまたはtickerから4桁コードを取り出す (例: "1301.T" -> "1301", "1301" -> "1301")
+        raw_ticker = str(row.get("Ticker") or row.get("ticker") or "")
+        code_4digit = raw_ticker.replace(".T", "").strip()
+        
+        if code_4digit in pdf_data:
+            data_item = pdf_data[code_4digit]
+            
+            # IDまたはTickerをキーにして個別更新
+            if "Ticker" in row:
+                patch_url = f"{SUPABASE_URL}/rest/v1/stocks_master?Ticker=eq.{raw_ticker}"
+            else:
+                patch_url = f"{SUPABASE_URL}/rest/v1/stocks_master?ticker=eq.{raw_ticker}"
+                
+            payload = {
+                "margin_buy": data_item["buy"],
+                "margin_sell": data_item["sell"]
+            }
+            
+            patch_res = requests.patch(patch_url, json=payload, headers=headers)
+            if patch_res.status_code in [200, 204]:
+                updated_count += 1
+
+    print(f"🎉 成功！ 計 {updated_count} 件の既存銘柄に信用残高データを上書き更新しました！")
 
 if __name__ == "__main__":
     print("1. JPXから最新PDFのURLを取得中...")
@@ -105,12 +132,10 @@ if __name__ == "__main__":
         f.write(pdf_res.content)
         
     print("3. PDFから信用データを解析中...")
-    margin_data = parse_margin_pdf("latest_margin.pdf")
-    print(f"   抽出完了: {len(margin_data)} 銘柄")
+    pdf_data = parse_margin_pdf("latest_margin.pdf")
+    print(f"   抽出完了: {len(pdf_data)} 銘柄分")
     
-    if margin_data:
-        print("4. Supabaseへデータを送信中...")
-        update_supabase(margin_data)
-        print("🎉 処理が終了しました。")
+    if pdf_data:
+        update_supabase_directly(pdf_data)
     else:
-        print("⚠️ エラー: PDFから信用残高データを抽出できませんでした。")
+        print("⚠️ エラー: PDFからデータを抽出できませんでした。")
