@@ -1,4 +1,4 @@
-name: Auto Update Margin Data via J-Quants
+name: Auto Update Margin Data
 
 on:
   schedule:
@@ -20,12 +20,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas
+          pip install requests beautifulsoup4 pandas
 
       - name: Run Auto Update Script
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          JQUANTS_REFRESH_TOKEN: ${{ secrets.JQUANTS_REFRESH_TOKEN }}
         run: |
           python update_margin_auto.py
