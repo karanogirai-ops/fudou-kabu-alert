@@ -29,55 +29,61 @@ def get_latest_pdf_url():
   raise Exception("JPXのページからPDFリンクが見つかりませんでした。")
 
 
-def parse_margin_pdf_tables(pdf_bytes):
-  """pdfplumberを使用してPDF内の表構造（テーブル）を格子のまま抽出し、
+def parse_margin_pdf_robust(pdf_bytes):
+  """pdfplumberのレイアウト解析（extract_words）を使って
 
-  売残合計（1列目の数値）と買残合計（最終列の数値）を正確に取得する
+  座標ベースで各行の要素を正確に順序付けし、数値を取り出す
   """
   extracted_dict = {}
 
   with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
     for page in pdf.pages:
-      # ページ内のテーブルを抽出
-      tables = page.extract_tables()
-      for table in tables:
-        for row in table:
-          if not row:
-            continue
+      words = page.extract_words(x_tolerance=3, y_tolerance=3)
+      if not words:
+        continue
 
-          # 行内のテキストを整理
-          clean_row = [
-              str(cell).strip().replace("\n", "") if cell else ""
-              for cell in row
-          ]
+      # Y座標（行）ごとに単語をグループ化
+      lines_dict = {}
+      for w in words:
+        top_key = round(w["top"], 1)
+        if top_key not in lines_dict:
+          lines_dict[top_key] = []
+        lines_dict[top_key].append(w)
 
-          # 銘柄コード（4桁または5桁）を探す
-          for idx, cell in enumerate(clean_row):
-            clean_code = cell.replace(".0", "")
-            if re.match(r"^\d{4}$", clean_code) or re.match(
-                r"^\d{5}$", clean_code
-            ):
-              code_4digit = clean_code[:4]
+      # 行ごとにX座標（左からの位置）順に並び替え
+      for top_key in sorted(lines_dict.keys()):
+        line_words = sorted(lines_dict[top_key], key=lambda x: x["x0"])
+        text_tokens = [w["text"] for w in line_words]
 
-              # コードより右側の列から数値セルのみを取り出す
-              after_cells = clean_row[idx + 1 :]
-              nums = []
-              for val in after_cells:
-                # カンマや記号を除去して純粋な数値かどうか判定
-                clean_num = re.sub(r"[^\d]", "", val)
-                if clean_num.isdigit() and len(clean_num) > 0:
-                  nums.append(int(clean_num))
+        # 行内に5桁のコード（例: 24330）があるか判定
+        for idx, token in enumerate(text_tokens):
+          if re.match(r"^\d{5}$", token):
+            code_4digit = token[:4]
+            after_tokens = text_tokens[idx + 1 :]
 
-              # JPXの表レイアウト:
-              # 数値配列の最初 [0] が「売り残高（合計）」、最後 [-1] が「買い残高（合計）」
-              if len(nums) >= 2:
-                sell_total = nums[0]
-                buy_total = nums[-1]
-                extracted_dict[code_4digit] = {
-                    "sell": sell_total,
-                    "buy": buy_total,
-                }
-              break
+            # コードより右側のトークンから純粋な数字のみ抽出
+            nums = []
+            for t in after_tokens:
+              clean_t = re.sub(r"[^\d]", "", t)
+              if clean_t.isdigit() and len(clean_t) > 0:
+                nums.append(int(clean_t))
+
+            # JPXの配置: [0]売残合計, [1]売残一般, [2]売残制度, [3]買残一般, [4]買残制度, [5]買残合計 (または前週比入りで7個)
+            if len(nums) >= 6:
+              sell_total = nums[0]
+              buy_total = nums[-1]  # 配列の最後が必ず「買残合計」
+              extracted_dict[code_4digit] = {
+                  "sell": sell_total,
+                  "buy": buy_total,
+              }
+            elif len(nums) >= 2:
+              sell_total = nums[0]
+              buy_total = nums[-1]
+              extracted_dict[code_4digit] = {
+                  "sell": sell_total,
+                  "buy": buy_total,
+              }
+            break
 
   return extracted_dict
 
@@ -106,7 +112,7 @@ def update_supabase_directly(pdf_data):
   rows = res.json()
   print(f"   Supabase登録銘柄数: {len(rows)} 件")
 
-  print("2. PDF表データを照合して信用残高（合計値）を更新中...")
+  print("2. 座標解析データを照合して信用残高を更新中...")
 
   updated_count = 0
   for row in rows:
@@ -136,7 +142,7 @@ def update_supabase_directly(pdf_data):
 
   print(
       f"🎉 成功！ 計 {updated_count}"
-      " 件の信用残高（PDF表解析データ）を正確に上書き更新しました！"
+      " 件の信用残高データを正確に上書き更新しました！"
   )
 
 
@@ -151,13 +157,13 @@ if __name__ == "__main__":
         pdf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30
     )
 
-    print("3. pdfplumberでPDFの表構造を精密解析中...")
-    pdf_data = parse_margin_pdf_tables(res.content)
-    print(f"   抽出完了: {len(pdf_data)} 銘柄分")
+    print("3. 位置座標（words）を精密解析中...")
+    pdf_data = parse_margin_pdf_robust(res.content)
+    print(f"   抽出成功銘柄数: {len(pdf_data)} 件")
 
     if pdf_data:
       update_supabase_directly(pdf_data)
     else:
-      print("⚠️ エラー: PDFから表データを抽出できませんでした。")
+      print("⚠️ エラー: PDFからデータを抽出できませんでした。")
   except Exception as e:
     print(f"❌ 処理失敗: {e}")
