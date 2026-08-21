@@ -25,8 +25,28 @@ USER_AGENTS = [
 ]
 
 
+def extract_number_from_element(soup, keyword):
+  """HTMLテーブルから指定キーワード（買残/売残）の直近数値を正確に安全抽出"""
+  try:
+    for tag in soup.find_all(["th", "td", "span", "li"]):
+      if keyword in tag.get_text():
+        # 親要素または同層要素から数値のみを持つタグを探す
+        parent = tag.find_parent(["tr", "div", "dl"])
+        if parent:
+          # カンマ区切りの純粋な数字セル（例: 39,200）を特定
+          numbers = re.findall(r"\b\d{1,3}(?:,\d{3})+\b|\b\d+\b", parent.text)
+          for num_str in numbers:
+            clean_num = int(num_str.replace(",", ""))
+            # 一般的な株数の範囲（100万株単位など、極端な10億以上の結合バグ値を除外）
+            if 0 < clean_num < 1000000000:
+              return clean_num
+  except Exception:
+    pass
+  return 0
+
+
 def fetch_single_margin(row):
-  """1銘柄分の信用残高をYahoo!ファイナンスから取得"""
+  """1銘柄の信用残高を取得"""
   raw_ticker = str(row.get("Ticker") or row.get("ticker") or "")
   code_4digit = raw_ticker.replace(".T", "").strip()
 
@@ -36,40 +56,49 @@ def fetch_single_margin(row):
   url = f"https://finance.yahoo.co.jp/quote/{code_4digit}.T/margin"
   headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-  for attempt in range(2):
-    try:
-      res = requests.get(url, headers=headers, timeout=8)
-      if res.status_code == 200:
-        soup = BeautifulSoup(res.text, "html.parser")
-        text = soup.get_text()
+  try:
+    res = requests.get(url, headers=headers, timeout=8)
+    if res.status_code == 200:
+      soup = BeautifulSoup(res.text, "html.parser")
 
-        buy_margin = 0
-        sell_margin = 0
+      buy_margin = 0
+      sell_margin = 0
 
-        buy_match = re.search(r"買残[^\d]*([\d,]+)", text)
-        if buy_match:
-          buy_margin = int(buy_match.group(1).replace(",", ""))
+      # テーブルのセル指定で買残・売残の数字のみを確実に取得
+      for tr in soup.find_all("tr"):
+        tr_text = tr.get_text()
+        if "買残" in tr_text and buy_margin == 0:
+          nums = re.findall(r"\b\d{1,3}(?:,\d{3})*\b", tr_text)
+          valid_nums = [
+              int(n.replace(",", ""))
+              for n in nums
+              if n.replace(",", "").isdigit()
+          ]
+          if valid_nums:
+            buy_margin = valid_nums[0]
 
-        sell_match = re.search(r"売残[^\d]*([\d,]+)", text)
-        if sell_match:
-          sell_margin = int(sell_match.group(1).replace(",", ""))
+        if "売残" in tr_text and sell_margin == 0:
+          nums = re.findall(r"\b\d{1,3}(?:,\d{3})*\b", tr_text)
+          valid_nums = [
+              int(n.replace(",", ""))
+              for n in nums
+              if n.replace(",", "").isdigit()
+          ]
+          if valid_nums:
+            sell_margin = valid_nums[0]
 
-        if buy_margin > 0 or sell_margin > 0:
-          updated_row = dict(row)
-          updated_row["margin_buy"] = buy_margin
-          updated_row["margin_sell"] = sell_margin
-          return updated_row
-        return None
-      elif res.status_code in [403, 429]:
-        time.sleep(1)
-    except Exception:
-      pass
+      if buy_margin > 0 or sell_margin > 0:
+        updated_row = dict(row)
+        updated_row["margin_buy"] = buy_margin
+        updated_row["margin_sell"] = sell_margin
+        return updated_row
+  except Exception:
+    pass
 
   return None
 
 
 def fetch_all_supabase_rows(headers):
-  """Supabaseから全銘柄を一括取得"""
   all_rows = []
   page_size = 1000
   start = 0
@@ -113,11 +142,10 @@ def update_supabase_parallel():
   })
   print(f"   対象銘柄数: {len(rows)} 件")
 
-  print("2. Yahoo!ファイナンスから高速並列通信でデータ取得中...")
+  print("2. Yahoo!ファイナンスから数字セルを直接抽出中...")
   payload_list = []
 
-  # 8スレッドで並列処理（処理速度を最速化）
-  with ThreadPoolExecutor(max_workers=8) as executor:
+  with ThreadPoolExecutor(max_workers=6) as executor:
     futures = [executor.submit(fetch_single_margin, row) for row in rows]
     completed_count = 0
 
@@ -129,11 +157,11 @@ def update_supabase_parallel():
 
       if completed_count % 500 == 0 or completed_count == len(rows):
         print(
-            f"   取得進捗: {completed_count} / {len(rows)} 件完了"
+            f"   進捗: {completed_count} / {len(rows)} 件完了"
             f" (抽出成功: {len(payload_list)} 件)"
         )
 
-  print("3. Supabaseへ一括送信（Upsert）中...")
+  print("3. Supabaseへ正当な一括データを更新中...")
   chunk_size = 200
   success_count = 0
   endpoint = f"{SUPABASE_URL}/rest/v1/stocks_master"
@@ -145,7 +173,7 @@ def update_supabase_parallel():
       success_count += len(chunk)
 
   print(
-      f"🎉 完了！ 計 {success_count} 件の信用残高データを高速更新しました！"
+      f"🎉 完了！ 計 {success_count} 件の信用残高データを正しく更新しました！"
   )
 
 
