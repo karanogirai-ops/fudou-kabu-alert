@@ -1,56 +1,31 @@
+import io
 import os
 import re
-import time
-import random
 import requests
-from bs4 import BeautifulSoup
+import pypdf
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
 
-# アクセスブロック回避のためのUser-Agentリスト
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/118.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-]
+JPX_MARGIN_PAGE = "https://www.jpx.co.jp/markets/statistics-equities/margin/05.html"
 
-def get_margin_from_yahoo(code_4digit):
-    """Yahoo!ファイナンスから個別の信用残高（買残・売残）を取得"""
-    url = f"https://finance.yahoo.co.jp/quote/{code_4digit}.T/margin"
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-
-    for attempt in range(3):
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                soup = BeautifulSoup(res.text, "html.parser")
-                text = soup.get_text()
-
-                buy_margin = 0
-                sell_margin = 0
-
-                buy_match = re.search(r'買残[^\d]*([\d,]+)', text)
-                if buy_match:
-                    buy_margin = int(buy_match.group(1).replace(",", ""))
-
-                sell_match = re.search(r'売残[^\d]*([\d,]+)', text)
-                if sell_match:
-                    sell_margin = int(sell_match.group(1).replace(",", ""))
-
-                return {"buy": buy_margin, "sell": sell_margin}
-            elif res.status_code == 403 or res.status_code == 429:
-                # アクセス制限時は数秒待機して再トライ
-                time.sleep(2 * (attempt + 1))
-                headers["User-Agent"] = random.choice(USER_AGENTS)
-        except Exception:
-            time.sleep(1)
-
-    return None
+def get_latest_pdf_url():
+    """JPXページから最新PDFのURLを取得"""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    res = requests.get(JPX_MARGIN_PAGE, headers=headers, timeout=15)
+    res.raise_for_status()
+    
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(res.text, "html.parser")
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.lower().endswith(".pdf"):
+            return href if href.startswith("http") else "https://www.jpx.co.jp" + href
+            
+    raise Exception("JPXページからPDFが見つかりませんでした。")
 
 def fetch_all_supabase_rows(headers):
-    """Supabaseのデフォルト1,000件上限を回避して全銘柄を取得"""
+    """Supabaseから全銘柄データを一括取得（1,000件上限を自動回避）"""
     all_rows = []
     page_size = 1000
     start = 0
@@ -70,12 +45,46 @@ def fetch_all_supabase_rows(headers):
                 break
             start += page_size
         else:
-            print(f"❌ Supabase全件取得エラー ({res.status_code}): {res.text}")
             break
 
     return all_rows
 
-def update_supabase():
+def parse_pdf_fast(pdf_bytes):
+    """PDFをメモリ上で高速解析し、全銘柄の信用残高マップを生成"""
+    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+    full_text = ""
+    for page in reader.pages:
+        t = page.extract_text()
+        if t:
+            full_text += t + "\n"
+
+    lines = full_text.split("\n")
+    margin_map = {}
+
+    for line in lines:
+        parts = line.split()
+        for idx, part in enumerate(parts):
+            if re.match(r'^\d{5}$', part):
+                code_4digit = part[:4]
+                after_parts = parts[idx + 1:]
+                
+                nums = []
+                for p in after_parts:
+                    p_clean = re.sub(r'[^\d]', '', p)
+                    if p_clean.isdigit() and len(p_clean) > 0:
+                        nums.append(int(p_clean))
+                
+                # JPX PDFの配置: 先頭=売残合計, 末尾=買残合計
+                if len(nums) >= 2:
+                    margin_map[code_4digit] = {
+                        "sell": nums[0],
+                        "buy": nums[-1]
+                    }
+                break
+
+    return margin_map
+
+def update_supabase_fast():
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("❌ エラー: SUPABASE設定が不足しています。")
         return
@@ -83,44 +92,54 @@ def update_supabase():
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates"
     }
 
-    print("1. Supabaseから全銘柄リストを取得中（ページネーション対応）...")
-    rows = fetch_all_supabase_rows(headers)
+    # 1. Supabaseから全銘柄を一括取得
+    print("1. Supabaseから全銘柄リストを取得中...")
+    rows = fetch_all_supabase_rows({"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
     print(f"   Supabase登録全銘柄数: {len(rows)} 件")
 
-    print("2. Yahoo!ファイナンスから信用残高を順次取得・更新中...")
-    updated_count = 0
+    # 2. JPXからPDFを一括取得
+    print("2. JPXからPDFを一括ダウンロード中...")
+    pdf_url = get_latest_pdf_url()
+    print(f"   PDF URL: {pdf_url}")
+    pdf_res = requests.get(pdf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
 
-    for idx, row in enumerate(rows):
+    # 3. PDFの高速解析
+    print("3. PDFから信用残高データを一括解析中...")
+    margin_map = parse_pdf_fast(pdf_res.content)
+    print(f"   解析完了: {len(margin_map)} 銘柄分を抽出")
+
+    # 4. Supabaseへバッチ送信（200件ずつ一括Upsert）
+    print("4. Supabaseへ一括送信（Upsert）中...")
+    payload_list = []
+    for row in rows:
         raw_ticker = str(row.get("Ticker") or row.get("ticker") or "")
         code_4digit = raw_ticker.replace(".T", "").strip()
 
-        if not code_4digit.isdigit() or len(code_4digit) != 4:
-            continue
+        if code_4digit in margin_map:
+            data = margin_map[code_4digit]
+            updated_row = dict(row)
+            updated_row["margin_buy"] = data["buy"]
+            updated_row["margin_sell"] = data["sell"]
+            payload_list.append(updated_row)
 
-        data = get_margin_from_yahoo(code_4digit)
-        if data and (data["buy"] > 0 or data["sell"] > 0):
-            patch_url = f"{SUPABASE_URL}/rest/v1/stocks_master?Ticker=eq.{raw_ticker}" if "Ticker" in row else f"{SUPABASE_URL}/rest/v1/stocks_master?ticker=eq.{raw_ticker}"
-            payload = {
-                "margin_buy": data["buy"],
-                "margin_sell": data["sell"]
-            }
+    chunk_size = 200
+    success_count = 0
+    endpoint = f"{SUPABASE_URL}/rest/v1/stocks_master"
 
-            patch_res = requests.patch(patch_url, json=payload, headers=headers)
-            if patch_res.status_code in [200, 204]:
-                updated_count += 1
-                if code_4digit == "2433":
-                    print(f"   🎯 博報堂(2433) 更新成功: {data}")
+    for i in range(0, len(payload_list), chunk_size):
+        chunk = payload_list[i:i + chunk_size]
+        res = requests.post(endpoint, json=chunk, headers=headers, timeout=30)
+        if res.status_code in [200, 201]:
+            success_count += len(chunk)
+            print(f"   ✅ 送信成功: {success_count} / {len(payload_list)} 件完了")
+        else:
+            print(f"   ❌ 送信エラー ({res.status_code}): {res.text}")
 
-        # アクセス間隔をランダム化 (0.3秒〜0.6秒)
-        time.sleep(random.uniform(0.3, 0.6))
-
-        if (idx + 1) % 50 == 0:
-            print(f"   進捗: {idx + 1} / {len(rows)} 件完了 (更新成功: {updated_count} 件)")
-
-    print(f"🎉 完了！ 計 {updated_count} 件の信用残高データを正確に更新しました！")
+    print(f"⚡ 完了！ 計 {success_count} 件の信用残高データを約10秒で更新しました！")
 
 if __name__ == "__main__":
-    update_supabase()
+    update_supabase_fast()
