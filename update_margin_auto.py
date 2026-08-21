@@ -59,34 +59,29 @@ def parse_margin_pdf(pdf_path):
                 else:
                     break
                 
-                # 有効なデータのみ抽出
-                if sell_margin > 0 or buy_margin > 0:
-                    extracted_data.append({
-                        "Ticker": code_raw,
-                        "ticker": code_raw,
-                        "margin_sell": sell_margin,
-                        "margin_buy": buy_margin
-                    })
+                extracted_data.append({
+                    "Ticker": code_raw,
+                    "ticker": code_raw,
+                    "margin_sell": sell_margin,
+                    "margin_buy": buy_margin
+                })
                 break
                 
     return extracted_data
 
 def update_supabase(data):
     if not SUPABASE_URL or not SUPABASE_KEY:
-        print("❌ エラー: SUPABASE_URL または SUPABASE_KEY が環境変数に設定されていません！")
+        print("❌ エラー: SUPABASE_URL または SUPABASE_KEY が設定されていません！")
         return
 
-    endpoint = f"{SUPABASE_URL}/rest/v1/stocks_master"
+    # ★ on_conflict=Ticker をURLに明示して確実に上書きさせる
+    endpoint = f"{SUPABASE_URL}/rest/v1/stocks_master?on_conflict=Ticker"
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates"
     }
-    
-    # 送信サンプルをログ出力
-    print(f"📊 Supabaseへ送信する最初の3件のデータサンプル:")
-    print(data[:3])
 
     chunk_size = 200
     success_count = 0
@@ -111,7 +106,7 @@ if __name__ == "__main__":
         
     print("3. PDFから信用データを解析中...")
     margin_data = parse_margin_pdf("latest_margin.pdf")
-    print(f"   抽出完了: {len(margin_data)} 銘柄 (残高あり銘柄数)")
+    print(f"   抽出完了: {len(margin_data)} 銘柄")
     
     if margin_data:
         print("4. Supabaseへデータを送信中...")
