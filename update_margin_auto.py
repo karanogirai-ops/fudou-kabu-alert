@@ -8,10 +8,17 @@ JQUANTS_REFRESH_TOKEN = os.environ.get("JQUANTS_REFRESH_TOKEN", "").strip()
 
 
 def get_jquants_id_token():
-  """リフレッシュトークンから一時アクセス用IDトークンを取得"""
-  url = f"https://api.jquants.com/v1/token/auth/refresh?refreshtoken={JQUANTS_REFRESH_TOKEN}"
-  res = requests.post(url, timeout=15)
+  """リフレッシュトークンからIDトークンを取得（J-Quants V1 API正則仕様）"""
+  url = "https://api.jquants.com/v1/token/auth/refresh"
+  # J-Quants APIはJSONボディでrefreshtokenを送る仕様です
+  payload = {"refreshtoken": JQUANTS_REFRESH_TOKEN}
+  headers = {"Content-Type": "application/json"}
+
+  res = requests.post(url, json=payload, headers=headers, timeout=15)
+  if res.status_code != 200:
+    print(f"❌ 認証エラー詳細 ({res.status_code}): {res.text}")
   res.raise_for_status()
+
   return res.json().get("idToken")
 
 
@@ -20,7 +27,6 @@ def get_margin_data_from_jquants(id_token):
   url = "https://api.jquants.com/v1/markets/weekly_margin_interest"
   headers = {"Authorization": f"Bearer {id_token}"}
 
-  # 直近の金曜日から過去4週間分の日付を検索
   today = datetime.now()
   date_candidates = []
   for i in range(30):
@@ -31,7 +37,6 @@ def get_margin_data_from_jquants(id_token):
   print(f"1. 検索対象の日付候補: {date_candidates[:3]}")
 
   data = []
-  target_date_used = ""
   for date_str in date_candidates:
     print(f"   日付 '{date_str}' でJ-Quants APIを問い合わせ中...")
     params = {"date": date_str}
@@ -40,16 +45,13 @@ def get_margin_data_from_jquants(id_token):
       res_data = res.json().get("weekly_margin_interest", [])
       if res_data:
         data = res_data
-        target_date_used = date_str
         print(
             f"✅ データ取得成功！ ({date_str} 時点のデータ: {len(data)} 件)"
         )
         break
 
   if not data:
-    print(
-      "⚠️ パラメータなしで全件取得を試行中..."
-    )
+    print("⚠️ パラメータなしで全件取得を試行中...")
     res = requests.get(url, headers=headers, timeout=30)
     if res.status_code == 200:
       data = res.json().get("weekly_margin_interest", [])
@@ -84,7 +86,6 @@ def update_supabase_bulk(margin_data):
       "Prefer": "resolution=merge-duplicates",
   }
 
-  # 1. Supabaseから現在のレコード全件を取得
   print("2. Supabaseから既存の銘柄リストを取得中...")
   get_url = f"{SUPABASE_URL}/rest/v1/stocks_master?select=*"
   res = requests.get(
@@ -102,7 +103,6 @@ def update_supabase_bulk(margin_data):
   rows = res.json()
   print(f"   Supabase登録銘柄数: {len(rows)} 件")
 
-  # 2. 更新用ペイロードの作成
   payload_list = []
   for row in rows:
     ticker_val = row.get("Ticker") or row.get("ticker")
@@ -113,7 +113,6 @@ def update_supabase_bulk(margin_data):
 
     if code_4digit in margin_data:
       item = margin_data[code_4digit]
-      # 既存のレコードに上書きするフィールドを構成
       updated_row = dict(row)
       updated_row["margin_buy"] = item["buy"]
       updated_row["margin_sell"] = item["sell"]
@@ -125,13 +124,6 @@ def update_supabase_bulk(margin_data):
     print("⚠️ 更新対象のデータが0件でした。")
     return
 
-  # 博報堂（2433）の更新データを確認用ログ出力
-  for p in payload_list:
-    if "2433" in str(p.get("Ticker") or p.get("ticker")):
-      print(f"   🎯 博報堂(2433)の更新内容: {p}")
-      break
-
-  # 200件ずつのチャンクでPostgREST Upsert通信
   chunk_size = 200
   success_count = 0
   endpoint = f"{SUPABASE_URL}/rest/v1/stocks_master"
@@ -141,11 +133,16 @@ def update_supabase_bulk(margin_data):
     res = requests.post(endpoint, json=chunk, headers=headers, timeout=30)
     if res.status_code in [200, 201]:
       success_count += len(chunk)
-      print(f"   ✅ Upsert送信成功: {success_count} / {len(payload_list)} 件完了")
+      print(
+          f"   ✅ Upsert送信成功: {success_count} / {len(payload_list)} 件完了"
+      )
     else:
       print(f"   ❌ Supabase Upsert エラー ({res.status_code}): {res.text}")
 
-  print(f"🎉 完了！ 計 {success_count} 件の信用残高データをSupabaseへ反映しました。")
+  print(
+      f"🎉 完了！ 計 {success_count}"
+      " 件の信用残高データをSupabaseへ反映しました。"
+  )
 
 
 if __name__ == "__main__":
