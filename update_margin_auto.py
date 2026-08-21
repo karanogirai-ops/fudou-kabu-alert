@@ -47,6 +47,9 @@ def parse_margin_pdf(pdf_path):
                     if p_clean.isdigit():
                         clean_nums.append(int(p_clean))
                 
+                sell_margin = 0
+                buy_margin = 0
+                
                 if len(clean_nums) >= 5:
                     sell_margin = clean_nums[0]
                     buy_margin = clean_nums[4]
@@ -56,19 +59,21 @@ def parse_margin_pdf(pdf_path):
                 else:
                     break
                 
-                extracted_data.append({
-                    "Ticker": code_raw,
-                    "ticker": code_raw,
-                    "margin_sell": sell_margin,
-                    "margin_buy": buy_margin
-                })
+                # 有効なデータのみ抽出
+                if sell_margin > 0 or buy_margin > 0:
+                    extracted_data.append({
+                        "Ticker": code_raw,
+                        "ticker": code_raw,
+                        "margin_sell": sell_margin,
+                        "margin_buy": buy_margin
+                    })
                 break
                 
     return extracted_data
 
 def update_supabase(data):
     if not SUPABASE_URL or not SUPABASE_KEY:
-        print("SUPABASE_URL または SUPABASE_KEY が設定されていません。")
+        print("❌ エラー: SUPABASE_URL または SUPABASE_KEY が環境変数に設定されていません！")
         return
 
     endpoint = f"{SUPABASE_URL}/rest/v1/stocks_master"
@@ -79,14 +84,20 @@ def update_supabase(data):
         "Prefer": "resolution=merge-duplicates"
     }
     
+    # 送信サンプルをログ出力
+    print(f"📊 Supabaseへ送信する最初の3件のデータサンプル:")
+    print(data[:3])
+
     chunk_size = 200
+    success_count = 0
     for i in range(0, len(data), chunk_size):
         chunk = data[i:i + chunk_size]
         res = requests.post(endpoint, json=chunk, headers=headers, timeout=15)
         if res.status_code in [200, 201]:
-            print(f"送信成功: {i + len(chunk)} / {len(data)} 件完了")
+            success_count += len(chunk)
+            print(f"✅ 送信成功: {success_count} / {len(data)} 件完了")
         else:
-            print(f"エラー ({res.status_code}): {res.text}")
+            print(f"❌ Supabase送信エラー ({res.status_code}): {res.text}")
 
 if __name__ == "__main__":
     print("1. JPXから最新PDFのURLを取得中...")
@@ -100,9 +111,11 @@ if __name__ == "__main__":
         
     print("3. PDFから信用データを解析中...")
     margin_data = parse_margin_pdf("latest_margin.pdf")
-    print(f"   抽出完了: {len(margin_data)} 銘柄")
+    print(f"   抽出完了: {len(margin_data)} 銘柄 (残高あり銘柄数)")
     
     if margin_data:
         print("4. Supabaseへデータを送信中...")
         update_supabase(margin_data)
-        print("🎉 信用残高データの完全自動更新が終了しました！")
+        print("🎉 処理が終了しました。")
+    else:
+        print("⚠️ エラー: PDFから信用残高データを抽出できませんでした。")
