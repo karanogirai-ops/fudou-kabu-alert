@@ -4,15 +4,12 @@ import requests
 from bs4 import BeautifulSoup
 import pypdf
 
-# GitHub Secrets または環境変数からSupabaseの接続情報を取得
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
 
-# JPX「銘柄別信用取引週末残高」ページURL
 JPX_MARGIN_PAGE = "https://www.jpx.co.jp/markets/statistics-equities/margin/05.html"
 
 def get_latest_pdf_url():
-    """05.html ページから最新のPDFリンクを取得"""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     res = requests.get(JPX_MARGIN_PAGE, headers=headers, timeout=15)
     res.raise_for_status()
@@ -26,7 +23,6 @@ def get_latest_pdf_url():
     raise Exception("JPXのページからPDFリンクが見つかりませんでした。")
 
 def parse_margin_pdf(pdf_path):
-    """PDFを全ページ読み込み、銘柄コードと信用売残(合計)・買残(合計)を正確に抽出"""
     reader = pypdf.PdfReader(pdf_path)
     extracted_data = []
     
@@ -41,21 +37,16 @@ def parse_margin_pdf(pdf_path):
     for line in lines:
         parts = line.split()
         for idx, part in enumerate(parts):
-            # 5桁数字（末尾0）の銘柄コード（例: 13010 -> 1301.T）
             if re.match(r'^\d{5}$', part):
                 code_raw = part[:4] + ".T"
                 
-                # 銘柄コードより後ろのパートから数値だけを抽出
                 after_parts = parts[idx + 1:]
                 clean_nums = []
                 for p in after_parts:
-                    p_clean = p.replace(',', '')
+                    p_clean = p.replace(',', '').replace('▲', '').strip()
                     if p_clean.isdigit():
                         clean_nums.append(int(p_clean))
                 
-                # 東証PDFの列レイアウト:
-                # 1番目の数値 = 売残高（合計）
-                # 5番目の数値 = 買残高（合計）
                 if len(clean_nums) >= 5:
                     sell_margin = clean_nums[0]
                     buy_margin = clean_nums[4]
@@ -65,7 +56,6 @@ def parse_margin_pdf(pdf_path):
                 else:
                     break
                 
-                # Supabaseのカラム名が Ticker / ticker のどちらでも適合するよう両方含める
                 extracted_data.append({
                     "Ticker": code_raw,
                     "ticker": code_raw,
@@ -77,7 +67,6 @@ def parse_margin_pdf(pdf_path):
     return extracted_data
 
 def update_supabase(data):
-    """Supabaseの stocks_master テーブルへ分割アップサート（上書き更新）"""
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("SUPABASE_URL または SUPABASE_KEY が設定されていません。")
         return
