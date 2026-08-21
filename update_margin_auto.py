@@ -47,29 +47,38 @@ def parse_margin_pdf(pdf_path):
                     if p_clean.isdigit():
                         clean_nums.append(int(p_clean))
                 
-                sell_margin = 0
-                buy_margin = 0
+                sell_total = 0
+                buy_total = 0
                 
-                if len(clean_nums) >= 5:
-                    sell_margin = clean_nums[0]
-                    buy_margin = clean_nums[4]
+                # JPX PDFの列順序:
+                # [0] 売り合計
+                # [1] 売り一般
+                # [2] 売り制度
+                # [3] 前週比売り
+                # [4] 買い一般
+                # [5] 買い制度
+                # [6] 買い合計
+                if len(clean_nums) >= 7:
+                    sell_total = clean_nums[0]
+                    buy_total = clean_nums[6]
+                elif len(clean_nums) >= 5:
+                    sell_total = clean_nums[0]
+                    buy_total = clean_nums[4]
                 elif len(clean_nums) >= 2:
-                    sell_margin = clean_nums[0]
-                    buy_margin = clean_nums[1]
+                    sell_total = clean_nums[0]
+                    buy_total = clean_nums[1]
                 else:
                     break
                 
-                # 4桁コードをキーとして保持
                 extracted_dict[code_4digit] = {
-                    "sell": sell_margin,
-                    "buy": buy_margin
+                    "sell": sell_total,
+                    "buy": buy_total
                 }
                 break
                 
     return extracted_dict
 
 def update_supabase_directly(pdf_data):
-    """既存のstocks_masterの全行を取得し、Tickerに合わせてPATCH（個別に確実更新）"""
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("❌ エラー: SUPABASE_URL または SUPABASE_KEY が設定されていません！")
         return
@@ -80,7 +89,6 @@ def update_supabase_directly(pdf_data):
         "Content-Type": "application/json"
     }
 
-    # 1. 既存の全銘柄の Ticker / ticker を取得
     print("1. Supabaseから既存の銘柄リストを取得中...")
     get_url = f"{SUPABASE_URL}/rest/v1/stocks_master?select=*"
     res = requests.get(get_url, headers=headers)
@@ -92,19 +100,16 @@ def update_supabase_directly(pdf_data):
     rows = res.json()
     print(f"   Supabase登録銘柄数: {len(rows)} 件")
 
-    # 2. 1行ずつマッチングして更新（100件ずつ並列処理）
-    print("2. 信用データを照合して個別UPDATE（確実上書き）中...")
+    print("2. 信用残高（合計値）を照合して更新中...")
     
     updated_count = 0
     for row in rows:
-        # Tickerまたはtickerから4桁コードを取り出す (例: "1301.T" -> "1301", "1301" -> "1301")
         raw_ticker = str(row.get("Ticker") or row.get("ticker") or "")
         code_4digit = raw_ticker.replace(".T", "").strip()
         
         if code_4digit in pdf_data:
             data_item = pdf_data[code_4digit]
             
-            # IDまたはTickerをキーにして個別更新
             if "Ticker" in row:
                 patch_url = f"{SUPABASE_URL}/rest/v1/stocks_master?Ticker=eq.{raw_ticker}"
             else:
@@ -119,7 +124,7 @@ def update_supabase_directly(pdf_data):
             if patch_res.status_code in [200, 204]:
                 updated_count += 1
 
-    print(f"🎉 成功！ 計 {updated_count} 件の既存銘柄に信用残高データを上書き更新しました！")
+    print(f"🎉 成功！ 計 {updated_count} 件の信用残高（合計値）を最新に上書き更新しました！")
 
 if __name__ == "__main__":
     print("1. JPXから最新PDFのURLを取得中...")
