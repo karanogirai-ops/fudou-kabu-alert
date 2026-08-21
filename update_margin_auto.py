@@ -39,30 +39,30 @@ def parse_margin_pdf(pdf_path):
         for idx, part in enumerate(parts):
             if re.match(r'^\d{5}$', part):
                 code_4digit = part[:4]
-                
                 after_parts = parts[idx + 1:]
-                clean_nums = []
+                
+                # 1. 符号（▲や-）がついた前週比などの項目を除外するフィルタリング
+                # 純粋な正の数値（残高）だけを抽出
+                pure_nums = []
                 for p in after_parts:
-                    p_clean = p.replace(',', '').replace('▲', '').strip()
+                    # ▲ や - が入っている（前週比・変化量）トークンはスキップ
+                    if '▲' in p or '-' in p:
+                        continue
+                    p_clean = p.replace(',', '').strip()
                     if p_clean.isdigit():
-                        clean_nums.append(int(p_clean))
+                        pure_nums.append(int(p_clean))
                 
-                sell_total = 0
-                buy_total = 0
-                
-                # JPX PDFの数値配列（clean_nums）の正しい対応位置:
-                # clean_nums[0] = 売残合計
-                # clean_nums[-1] = 買残合計 (行の最後の数値)
-                if len(clean_nums) >= 2:
-                    sell_total = clean_nums[0]
-                    buy_total = clean_nums[-1]
-                else:
-                    break
-                
-                extracted_dict[code_4digit] = {
-                    "sell": sell_total,
-                    "buy": buy_total
-                }
+                # JPX標準フォーマット（売残合計, 売残一般, 売残制度, 買残一般, 買残制度, 買残合計）
+                # pure_nums[0] が 売残合計
+                # pure_nums[-1] が 買残合計
+                if len(pure_nums) >= 2:
+                    sell_total = pure_nums[0]
+                    buy_total = pure_nums[-1]
+                    
+                    extracted_dict[code_4digit] = {
+                        "sell": sell_total,
+                        "buy": buy_total
+                    }
                 break
                 
     return extracted_dict
