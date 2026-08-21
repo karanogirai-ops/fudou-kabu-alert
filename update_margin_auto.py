@@ -8,7 +8,7 @@ import pypdf
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
 
-# ★ 正しいJPX「銘柄別信用取引週末残高」のページURL
+# JPX「銘柄別信用取引週末残高」ページURL
 JPX_MARGIN_PAGE = "https://www.jpx.co.jp/markets/statistics-equities/margin/05.html"
 
 def get_latest_pdf_url():
@@ -18,8 +18,6 @@ def get_latest_pdf_url():
     res.raise_for_status()
     
     soup = BeautifulSoup(res.text, "html.parser")
-    
-    # ページ内の .pdf リンクを探す
     for a in soup.find_all("a", href=True):
         href = a["href"]
         if href.lower().endswith(".pdf"):
@@ -28,7 +26,7 @@ def get_latest_pdf_url():
     raise Exception("JPXのページからPDFリンクが見つかりませんでした。")
 
 def parse_margin_pdf(pdf_path):
-    """PDFを全ページ読み込み、銘柄コードと信用買残・売残を抽出"""
+    """PDFを全ページ読み込み、銘柄コードと信用売残(合計)・買残(合計)を正確に抽出"""
     reader = pypdf.PdfReader(pdf_path)
     extracted_data = []
     
@@ -42,24 +40,38 @@ def parse_margin_pdf(pdf_path):
     
     for line in lines:
         parts = line.split()
-        for part in parts:
-            # 5桁数字（末尾0）の東証銘柄コード（例: 13010 -> 1301.T）
+        for idx, part in enumerate(parts):
+            # 5桁数字（末尾0）の銘柄コード（例: 13010 -> 1301.T）
             if re.match(r'^\d{5}$', part):
                 code_raw = part[:4] + ".T"
-                numbers = [p.replace(',', '') for p in parts if re.match(r'^\d{1,3}(,\d{3})*$', p) or p.isdigit()]
                 
-                if len(numbers) >= 2:
-                    try:
-                        sell_margin = int(numbers[0])
-                        buy_margin = int(numbers[1])
-                        
-                        extracted_data.append({
-                            "ticker": code_raw,
-                            "margin_sell": sell_margin,
-                            "margin_buy": buy_margin
-                        })
-                    except ValueError:
-                        pass
+                # 銘柄コードより後ろのパートから数値だけを抽出
+                after_parts = parts[idx + 1:]
+                clean_nums = []
+                for p in after_parts:
+                    p_clean = p.replace(',', '')
+                    if p_clean.isdigit():
+                        clean_nums.append(int(p_clean))
+                
+                # 東証PDFの列レイアウト:
+                # 1番目の数値 = 売残高（合計）
+                # 5番目の数値 = 買残高（合計）
+                if len(clean_nums) >= 5:
+                    sell_margin = clean_nums[0]
+                    buy_margin = clean_nums[4]
+                elif len(clean_nums) >= 2:
+                    sell_margin = clean_nums[0]
+                    buy_margin = clean_nums[1]
+                else:
+                    break
+                
+                # Supabaseのカラム名が Ticker / ticker のどちらでも適合するよう両方含める
+                extracted_data.append({
+                    "Ticker": code_raw,
+                    "ticker": code_raw,
+                    "margin_sell": sell_margin,
+                    "margin_buy": buy_margin
+                })
                 break
                 
     return extracted_data
