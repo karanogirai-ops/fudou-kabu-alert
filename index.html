@@ -41,9 +41,6 @@
 </div>
 
 <script>
-    // ==========================================
-    // ⚙️ 設定済みパラメーター
-    // ==========================================
     const SUPABASE_BASE_URL = "https://birdrmpqlzdtyradkmjt.supabase.co";
     const SUPABASE_KEY      = "sb_publishable_vpu_LAeBKQqg8PLreEag6A_yAEnBALt";
 
@@ -59,7 +56,6 @@
             return;
         }
 
-        // Ticker形式を "4499.T" に整形
         const code4digit = codeInput.replace(".T", "").trim();
         const ticker = `${code4digit}.T`;
         const ratioVal = parseFloat(ratioInput);
@@ -68,7 +64,8 @@
         const headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": `Bearer ${SUPABASE_KEY}`,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Prefer": "return=representation"
         };
 
         const payload = {
@@ -83,12 +80,18 @@
             });
 
             if (response.ok) {
-                showMessage(`✅ 更新成功！<br>銘柄: ${ticker}<br>新 浮動株率: ${ratioVal}%`, "success");
-                document.getElementById("code").value = "";
-                document.getElementById("ratio").value = "";
+                const data = await response.json();
+                if (Array.isArray(data) && data.length > 0) {
+                    const name = data[0].Name || "";
+                    showMessage(`✅ 更新成功！<br>銘柄: ${name} (${ticker})<br>新 浮動株率: ${ratioVal}%`, "success");
+                    document.getElementById("code").value = "";
+                    document.getElementById("ratio").value = "";
+                } else {
+                    showMessage(`❌ 更新失敗: 銘柄コード (${ticker}) が見つかりませんでした。`, "error");
+                }
             } else {
                 const errText = await response.text();
-                showMessage(`❌ 更新失敗 (${response.status}): ${errText}`, "error");
+                showMessage(`❌ 通信エラー (${response.status}): ${errText}`, "error");
             }
         } catch (error) {
             showMessage(`❌ 通信エラー: ${error.message}`, "error");
