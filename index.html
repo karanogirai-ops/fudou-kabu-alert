@@ -26,13 +26,13 @@
     <h2>📊 浮動株率 手動更新</h2>
     
     <div class="form-group">
-        <label for="code">銘柄コード (例: 2433)</label>
-        <input type="number" id="code" placeholder="2433" inputmode="numeric">
+        <label for="code">銘柄コード (例: 4499)</label>
+        <input type="text" id="code" placeholder="4499" inputmode="numeric">
     </div>
 
     <div class="form-group">
-        <label for="ratio">新しい浮動株率 % (例: 35.5)</label>
-        <input type="number" id="ratio" step="0.01" placeholder="35.5" inputmode="decimal">
+        <label for="ratio">新しい浮動株率 % (例: 19.9)</label>
+        <input type="number" id="ratio" step="0.01" placeholder="19.9" inputmode="decimal">
     </div>
 
     <button onclick="updateSupabase()">Supabaseを更新</button>
@@ -42,10 +42,10 @@
 
 <script>
     // ==========================================
-    // ⚙️ 設定（ご自身のSupabase情報に書き換えてください）
+    // ⚙️ 設定済みパラメーター
     // ==========================================
-    const SUPABASE_URL = "https://birdrmpqlzdtyradkmjt.supabase.co/rest/v1/"; // 末尾の / は不要
-    const SUPABASE_KEY = "sb_publishable_vpu_LAeBKQqg8PLreEag6A_yAEnBALt";         // anon (public) キー
+    const SUPABASE_BASE_URL = "https://birdrmpqlzdtyradkmjt.supabase.co";
+    const SUPABASE_KEY      = "sb_publishable_vpu_LAeBKQqg8PLreEag6A_yAEnBALt";
 
     async function updateSupabase() {
         const codeInput = document.getElementById("code").value.trim();
@@ -59,17 +59,16 @@
             return;
         }
 
-        // Tickerの形式を "2433.T" に統一
+        // Ticker形式を "4499.T" に整形
         const code4digit = codeInput.replace(".T", "").trim();
         const ticker = `${code4digit}.T`;
         const ratioVal = parseFloat(ratioInput);
 
-        const url = `${SUPABASE_URL}/rest/v1/stocks_master?Ticker=eq.${ticker}`;
+        const url = `${SUPABASE_BASE_URL}/rest/v1/stocks_master?Ticker=eq.${ticker}`;
         const headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": `Bearer ${SUPABASE_KEY}`,
-            "Content-Type": "application/json",
-            "Prefer": "return=representation"
+            "Content-Type": "application/json"
         };
 
         const payload = {
@@ -83,15 +82,13 @@
                 body: JSON.stringify(payload)
             });
 
-            const data = await response.json();
-
-            if (response.ok && Array.isArray(data) && data.length > 0) {
-                const updatedName = data[0].Name || "";
-                showMessage(`✅ 更新成功！<br>銘柄: ${updatedName} (${ticker})<br>新 浮動株率: ${ratioVal}%`, "success");
+            if (response.ok) {
+                showMessage(`✅ 更新成功！<br>銘柄: ${ticker}<br>新 浮動株率: ${ratioVal}%`, "success");
                 document.getElementById("code").value = "";
                 document.getElementById("ratio").value = "";
             } else {
-                showMessage(`❌ 更新失敗: 銘柄コード (${ticker}) が見つかりませんでした。`, "error");
+                const errText = await response.text();
+                showMessage(`❌ 更新失敗 (${response.status}): ${errText}`, "error");
             }
         } catch (error) {
             showMessage(`❌ 通信エラー: ${error.message}`, "error");
