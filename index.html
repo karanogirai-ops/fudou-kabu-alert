@@ -41,7 +41,7 @@
 </div>
 
 <script>
-    const SUPABASE_BASE_URL = "https://birdrmpqlzdtyradkmjt.supabase.co/rest/v1/";
+    const SUPABASE_BASE_URL = "https://birdrmpqlzdtyradkmjt.supabase.co";
     const SUPABASE_KEY      = "sb_publishable_vpu_LAeBKQqg8PLreEag6A_yAEnBALt";
 
     async function updateSupabase() {
@@ -99,6 +99,7 @@
     }
 
     function showMessage(text, type) {
+        const msgDiv = document.innerHTML = text;
         const msgDiv = document.getElementById("message");
         msgDiv.innerHTML = text;
         msgDiv.className = type;
