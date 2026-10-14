@@ -1,0 +1,17 @@
+name: Keep Supabase Alive
+
+on:
+  schedule:
+    # 毎週火曜日と金曜日の午前9時(JST)に自動実行（休止の7日制限を回避）
+    - cron: '0 0 * * 2,5'
+  workflow_dispatch: # 手動実行ボタンも有効化
+
+jobs:
+  ping-supabase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase REST API
+        run: |
+          curl -s -X GET "https://birdrmpqlzdtyradkmjt.supabase.co/rest/v1/stocks_master?select=Ticker&limit=1" \
+            -H "apikey: sb_publishable_vpu_LAeBKQqg8PLreEag6A_yAEnBALt" \
+            -H "Authorization: Bearer sb_publishable_vpu_LAeBKQqg8PLreEag6A_yAEnBALt"
